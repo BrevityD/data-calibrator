@@ -5,10 +5,19 @@ description = "Experiments on calibrating the correlation between data domains a
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "llamafactory",
     "loguru>=0.7.3",
     "math-verify[antlr4-9-3]>=0.8.0",
     "torch==2.8.0",
     "tqdm>=4.67.1",
     "transformers==4.57.1",
-    "vllm>=0.11.0"
+    "vllm>=0.11.0",
 ]
+
+[tool.uv.workspace]
+members = [
+    "LlamaFactory",
+]
+
+[tool.uv.sources]
+llamafactory = { workspace = true, editable = true }
