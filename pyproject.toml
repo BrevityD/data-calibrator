@@ -5,10 +5,14 @@ description = "Experiments on calibrating the correlation between data domains a
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "datasets>=4.4.2",
     "loguru>=0.7.3",
     "math-verify[antlr4-9-3]>=0.8.0",
+    "pytest>=9.0.2",
     "torch==2.8.0",
     "tqdm>=4.67.1",
     "transformers==4.57.1",
-    "vllm>=0.11.0"
+    "unsloth>=2025.11.1",
+    "vllm>=0.11.0",
+    "wandb>=0.23.1",
 ]
