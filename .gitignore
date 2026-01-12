@@ -215,3 +215,6 @@ checkpoints/
 # data
 data/
 hf_cache/
+datasets/**
+!datasets/**/*.py
+!datasets/**/*.md
