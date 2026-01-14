@@ -49,8 +49,36 @@ cleanup_server() {
     fi
 }
 
-# Trap to ensure cleanup on script exit or interruption
-trap 'if [ -n "$SERVER_PID" ]; then cleanup_server $SERVER_PID; fi; exit' INT TERM EXIT
+cleanup_and_exit() {
+    echo "Interrupted! Cleaning up..."
+    # Disable trap to prevent recursion
+    trap - INT TERM EXIT
+    
+    # Kill the generation process if it's running
+    if [ -n "$GEN_PID" ]; then
+        echo "Killing generation process $GEN_PID..."
+        kill -TERM "$GEN_PID" 2>/dev/null
+    fi
+    
+    if [ -n "$SERVER_PID" ]; then
+        cleanup_server $SERVER_PID
+    fi
+    
+    # Kill any other background jobs (like background evaluation)
+    # jobs -p lists PIDs of background jobs
+    JOBS=$(jobs -p)
+    if [ -n "$JOBS" ]; then
+        echo "Killing background jobs: $JOBS"
+        kill -TERM $JOBS 2>/dev/null
+    fi
+    
+    exit 1
+}
+
+# Trap for user interruption (Ctrl+C)
+trap 'cleanup_and_exit' INT TERM
+# Trap for normal exit (cleanup server if left running)
+trap 'if [ -n "$SERVER_PID" ]; then cleanup_server $SERVER_PID; fi' EXIT
 
 for CHECKPOINT in $CHECKPOINTS; do
     MODEL_PATH="${BASE_DIR}/${CHECKPOINT}"
@@ -117,6 +145,7 @@ for CHECKPOINT in $CHECKPOINTS; do
         echo "Server is ready! Running generation..."
         
         # 1. Run Generation ONLY (Blocking, keeps GPU busy)
+        # Run in background and wait so we can trap signals
         PYTHONPATH=. uv run python -m evaluation \
             --action generate \
             --domain code \
@@ -128,9 +157,12 @@ for CHECKPOINT in $CHECKPOINTS; do
             --temperature 0.6 \
             --top_p 0.95 \
             --top_k 20 \
-            --no_timestamp
+            --no_timestamp &
             
+        GEN_PID=$!
+        wait $GEN_PID
         GEN_EXIT_CODE=$?
+        GEN_PID=""
         
         # 2. Stop Server IMMEDIATELY to free GPU for next checkpoint
         echo "Generation finished. Stopping server ${SERVER_PID} to release GPU..."
