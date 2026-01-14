@@ -16,7 +16,7 @@ if __name__ == "__main__":
     parser.add_argument("--domain", type=str, required=True, choices=["code", "logic", "math"], help="Domain to evaluate")
     parser.add_argument("--server_url", type=str, help="URL of the vLLM server (required for generation)")
     parser.add_argument("--model", type=str, default=None, help="Model name on server (optional)")
-    parser.add_argument("--split", type=str, default="test", choices=["train", "test"], help="Dataset split to use")
+    parser.add_argument("--split", type=str, default="test", choices=["train", "test", "all"], help="Dataset split to use")
     parser.add_argument("--output_dir", type=str, default="outputs", help="Output directory")
     parser.add_argument("--input_file", type=str, help="Input JSONL file for evaluation-only mode")
     parser.add_argument("--max_tokens", type=int, default=2048, help="Max tokens for generation")
@@ -25,6 +25,7 @@ if __name__ == "__main__":
     parser.add_argument("--temperature", type=float, default=0.0, help="Sampling temperature")
     parser.add_argument("--top_p", type=float, default=1.0, help="Top-p sampling")
     parser.add_argument("--top_k", type=int, default=-1, help="Top-k sampling")
+    parser.add_argument("--no_timestamp", action="store_true", help="Disable timestamp in output directory (useful for resuming)")
     
     args = parser.parse_args()
     
@@ -39,5 +40,6 @@ if __name__ == "__main__":
         max_tokens=args.max_tokens,
         temperature=args.temperature,
         top_p=args.top_p,
-        top_k=args.top_k
+        top_k=args.top_k,
+        use_timestamp=not args.no_timestamp
     )

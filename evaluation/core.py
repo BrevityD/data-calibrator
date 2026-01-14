@@ -218,8 +218,51 @@ async def generate_responses(
     # 1. Load Dataset
     logger.info(f"Loading dataset for generation...")
     train_ds, test_ds = get_dataset(domain)
-    dataset = train_ds if split == "train" else test_ds
+    
+    if split == "train":
+        dataset = train_ds
+        # Tag for consistency
+        dataset = dataset.map(lambda x: {"dataset_split": "train"})
+    elif split == "test":
+        dataset = test_ds
+        # Tag for consistency
+        dataset = dataset.map(lambda x: {"dataset_split": "test"})
+    elif split == "all":
+        from datasets import concatenate_datasets
+        # Tag datasets so we can distinguish them later
+        train_ds = train_ds.map(lambda x: {"dataset_split": "train"})
+        test_ds = test_ds.map(lambda x: {"dataset_split": "test"})
+        dataset = concatenate_datasets([train_ds, test_ds])
+    else:
+        raise ValueError(f"Unknown split: {split}")
+        
     logger.info(f"Dataset loaded. Size: {len(dataset)}")
+
+    # Check for existing progress (Resume)
+    existing_ids = set()
+    if output_file.exists():
+        logger.info(f"Found existing output file {output_file}. Checking for completed samples...")
+        with open(output_file, "r", encoding="utf-8") as f:
+            for line in f:
+                try:
+                    data = json.loads(line)
+                    existing_ids.add(data["id"])
+                except json.JSONDecodeError:
+                    continue
+        logger.info(f"Found {len(existing_ids)} completed samples.")
+
+    # Filter dataset
+    if existing_ids:
+        # Assuming process_sample saves "id": index.
+        # So we just need to skip indices present in existing_ids.
+        indices_to_process = [i for i in range(len(dataset)) if i not in existing_ids]
+        logger.info(f"Resuming generation. {len(indices_to_process)} samples remaining.")
+    else:
+        indices_to_process = range(len(dataset))
+
+    if not indices_to_process:
+        logger.info("All samples already generated!")
+        return []
 
     # 2. Setup OpenAI Client
     client = AsyncOpenAI(base_url=server_url.rstrip("/") + "/v1", api_key="EMPTY")
@@ -237,7 +280,8 @@ async def generate_responses(
     # Create a semaphore to limit concurrency
     sem = asyncio.Semaphore(concurrency)
     
-    async def process_sample(index, example):
+    async def process_sample(index):
+        example = dataset[index]
         messages = example["prompt"]
         try:
             async with sem:
@@ -280,30 +324,28 @@ async def generate_responses(
                 "error": str(e)
             }
 
-    tasks = [process_sample(i, ex) for i, ex in enumerate(dataset)]
+    tasks = [process_sample(i) for i in indices_to_process]
     
     results = []
-    for f in tqdm(asyncio.as_completed(tasks), total=len(dataset), desc="Generating"):
-        res = await f
-        results.append(res)
+    truncation_count = 0
     
-    # Sort results by ID to maintain order
-    results.sort(key=lambda x: x["id"])
-    
-    # Calculate truncation statistics
-    truncation_count = sum(1 for r in results if r.get("finish_reason") == "length")
-    truncation_rate = truncation_count / len(results) if results else 0
+    # Open file in append mode for streaming results
+    with open(output_file, "a", encoding="utf-8") as f:
+        for fut in tqdm(asyncio.as_completed(tasks), total=len(tasks), desc="Generating"):
+            res = await fut
+            results.append(res)
+            
+            # Write immediately
+            f.write(json.dumps(res, ensure_ascii=False) + "\n")
+            f.flush() # Ensure it hits the disk
+            
+            if res.get("finish_reason") == "length":
+                truncation_count += 1
     
     end_time = time.time()
     logger.info(f"Generation finished in {end_time - start_time:.2f}s")
-    logger.info(f"Truncation Rate: {truncation_rate:.2%} ({truncation_count}/{len(results)}) samples stopped due to length limit.")
+    logger.info(f"Truncation Rate (this run): {truncation_count}/{len(results)} samples stopped due to length limit.")
     
-    # 4. Save
-    logger.info(f"Saving generated responses to {output_file}...")
-    with open(output_file, "w", encoding="utf-8") as f:
-        for res in results:
-            f.write(json.dumps(res, ensure_ascii=False) + "\n")
-            
     return results
 
 def evaluate_responses(
@@ -322,7 +364,11 @@ def evaluate_responses(
     stats = {
         "correct_count": 0,
         "evaluated_count": 0,
-        "format_correct_count": 0
+        "format_correct_count": 0,
+        # Split-wise stats
+        "train": {"correct": 0, "total": 0},
+        "test": {"correct": 0, "total": 0},
+        "unknown": {"correct": 0, "total": 0}
     }
     
     with open(eval_output_file, "w", encoding="utf-8") as f:
@@ -333,13 +379,20 @@ def evaluate_responses(
             if not orig:
                 logger.warning(f"Skipping record {record.get('id')} due to missing original example")
                 continue
-                
+            
+            # Identify split
+            ds_split = orig.get("dataset_split", "unknown")
+            if ds_split not in stats:
+                ds_split = "unknown"
+
             is_correct, is_format_correct = evaluate_sample(domain, prediction, orig)
             
             if is_correct is not None:
                 stats["evaluated_count"] += 1
+                stats[ds_split]["total"] += 1
                 if is_correct:
                     stats["correct_count"] += 1
+                    stats[ds_split]["correct"] += 1
             
             if is_format_correct:
                 stats["format_correct_count"] += 1
@@ -354,7 +407,13 @@ def evaluate_responses(
     # Log aggregate metrics
     if stats["evaluated_count"] > 0:
         accuracy = stats["correct_count"] / stats["evaluated_count"]
-        logger.info(f"Accuracy: {accuracy:.2%} ({stats['correct_count']}/{stats['evaluated_count']})")
+        logger.info(f"Overall Accuracy: {accuracy:.2%} ({stats['correct_count']}/{stats['evaluated_count']})")
+        
+        # Log split metrics
+        for s in ["train", "test"]:
+            if stats[s]["total"] > 0:
+                acc = stats[s]["correct"] / stats[s]["total"]
+                logger.info(f"{s.capitalize()} Accuracy: {acc:.2%} ({stats[s]['correct']}/{stats[s]['total']})")
     
     if len(data) > 0:
         format_acc = stats["format_correct_count"] / len(data)
@@ -371,16 +430,22 @@ def run_eval(
     temperature: float = 0.0,
     top_p: float = 1.0,
     top_k: int = -1,
-    input_file: Optional[str] = None
+    input_file: Optional[str] = None,
+    use_timestamp: bool = True
 ):
     # Setup output directory
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_dir = Path(output_dir) / f"{domain}_{split}_{timestamp}"
+    if use_timestamp:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_dir = Path(output_dir) / f"{domain}_{split}_{timestamp}"
+    else:
+        # If no timestamp, we assume the output_dir IS the run dir
+        run_dir = Path(output_dir)
+        
     setup_logger(run_dir)
     
     # Save experiment configuration
     config = {
-        "timestamp": timestamp,
+        "timestamp": datetime.now().strftime("%Y%m%d_%H%M%S"),
         "action": action,
         "domain": domain,
         "split": split,
