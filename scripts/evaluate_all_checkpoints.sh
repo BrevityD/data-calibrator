@@ -88,10 +88,11 @@ for CHECKPOINT in $CHECKPOINTS; do
     done
     
     if [ "$SERVER_READY" = true ]; then
-        echo "Server is ready! Running evaluation..."
+        echo "Server is ready! Running generation..."
         
+        # 1. Run Generation ONLY (Blocking, keeps GPU busy)
         PYTHONPATH=. uv run python -m evaluation \
-            --action all \
+            --action generate \
             --domain code \
             --server_url "${SERVER_URL}" \
             --split "${SPLIT}" \
@@ -103,20 +104,35 @@ for CHECKPOINT in $CHECKPOINTS; do
             --top_k 20 \
             --no_timestamp
             
-        EVAL_EXIT_CODE=$?
-        if [ $EVAL_EXIT_CODE -eq 0 ]; then
-            echo "Evaluation for ${MODEL_NAME} completed successfully."
+        GEN_EXIT_CODE=$?
+        
+        # 2. Stop Server IMMEDIATELY to free GPU for next checkpoint
+        echo "Generation finished. Stopping server ${SERVER_PID} to release GPU..."
+        kill $SERVER_PID
+        wait $SERVER_PID 2>/dev/null || true
+        
+        if [ $GEN_EXIT_CODE -eq 0 ]; then
+            echo "Generation successful. Starting evaluation in background..."
+            
+            # 3. Run Evaluation in BACKGROUND (Non-blocking, uses CPU)
+            # We redirect output to a log file to avoid cluttering the main terminal
+            PYTHONPATH=. uv run python -m evaluation \
+                --action evaluate \
+                --domain code \
+                --input_file "${CHECKPOINT_OUTPUT_DIR}/generated_responses.jsonl" \
+                --output_dir "${CHECKPOINT_OUTPUT_DIR}" \
+                --split "${SPLIT}" \
+                --no_timestamp > "${CHECKPOINT_OUTPUT_DIR}/eval_process.log" 2>&1 &
+                
+            echo "Evaluation job for ${MODEL_NAME} submitted to background."
         else
-            echo "Evaluation for ${MODEL_NAME} failed with exit code ${EVAL_EXIT_CODE}."
+            echo "Generation failed with exit code ${GEN_EXIT_CODE}. Skipping evaluation."
         fi
     else
         echo "Timeout or crash waiting for server for ${MODEL_NAME}. Skipping."
+        # Ensure server is killed if it failed to start properly
+        kill $SERVER_PID 2>/dev/null || true
     fi
-    
-    # Cleanup
-    echo "Stopping server ${SERVER_PID}..."
-    kill $SERVER_PID
-    wait $SERVER_PID 2>/dev/null || true
     
     # Extra safety: ensure port is free
     echo "Waiting for port release..."
@@ -124,4 +140,5 @@ for CHECKPOINT in $CHECKPOINTS; do
     
 done
 
-echo "All checkpoints processed."
+echo "All checkpoints processed (Evaluation may still be running in background)."
+echo "Check individual eval_process.log files for status."
