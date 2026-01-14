@@ -26,6 +26,32 @@ mkdir -p "$OUTPUT_BASE"
 # sort -V handles version sorting which works for checkpoint-1, checkpoint-2, checkpoint-10
 CHECKPOINTS=$(ls "$BASE_DIR" | grep "checkpoint-" | sort -V)
 
+# Function to kill server safely
+cleanup_server() {
+    local pid=$1
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        echo "Stopping server process $pid..."
+        kill -TERM "$pid"
+        
+        # Wait up to 10 seconds for graceful shutdown
+        for i in {1..10}; do
+            if ! kill -0 "$pid" 2>/dev/null; then
+                break
+            fi
+            sleep 1
+        done
+        
+        # Force kill if still running
+        if kill -0 "$pid" 2>/dev/null; then
+            echo "Server did not stop gracefully. Force killing..."
+            kill -9 "$pid"
+        fi
+    fi
+}
+
+# Trap to ensure cleanup on script exit or interruption
+trap 'if [ -n "$SERVER_PID" ]; then cleanup_server $SERVER_PID; fi; exit' INT TERM EXIT
+
 for CHECKPOINT in $CHECKPOINTS; do
     MODEL_PATH="${BASE_DIR}/${CHECKPOINT}"
     MODEL_NAME="${CHECKPOINT}"
@@ -108,8 +134,7 @@ for CHECKPOINT in $CHECKPOINTS; do
         
         # 2. Stop Server IMMEDIATELY to free GPU for next checkpoint
         echo "Generation finished. Stopping server ${SERVER_PID} to release GPU..."
-        kill $SERVER_PID
-        wait $SERVER_PID 2>/dev/null || true
+        cleanup_server $SERVER_PID
         
         if [ $GEN_EXIT_CODE -eq 0 ]; then
             echo "Generation successful. Starting evaluation in background..."
@@ -131,8 +156,11 @@ for CHECKPOINT in $CHECKPOINTS; do
     else
         echo "Timeout or crash waiting for server for ${MODEL_NAME}. Skipping."
         # Ensure server is killed if it failed to start properly
-        kill $SERVER_PID 2>/dev/null || true
+        cleanup_server $SERVER_PID
     fi
+    
+    # Reset PID variable so trap doesn't try to kill it again later
+    SERVER_PID=""
     
     # Extra safety: ensure port is free
     echo "Waiting for port release..."
@@ -140,5 +168,7 @@ for CHECKPOINT in $CHECKPOINTS; do
     
 done
 
+# Clear the trap before exiting normally to avoid double cleanup
+trap - INT TERM EXIT
 echo "All checkpoints processed (Evaluation may still be running in background)."
 echo "Check individual eval_process.log files for status."
