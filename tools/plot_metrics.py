@@ -144,7 +144,7 @@ def main():
     plt.figure(figsize=(10, 6))
     plt.plot(steps, accuracies, marker='o', linestyle='-', color='b', label='Accuracy')
     
-    plt.title(f'Model Accuracy vs Training Steps ({args.domain})')
+    plt.title(f'Model Accuracy vs Training Steps ({args.domain} - {args.split})')
     plt.xlabel('Checkpoint Step')
     plt.ylabel('Accuracy')
     plt.grid(True, linestyle='--', alpha=0.7)
