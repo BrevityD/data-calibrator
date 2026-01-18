@@ -21,16 +21,16 @@ except ImportError:
 logger = get_logger()
 
 # Logic to find the dataset path relative to the project root
-DEFAULT_DATASET_ID = str(Path(__file__).resolve().parents[4] / "datasets" / "code_domain" / "bigcodebench")
+DEFAULT_DATASET_ID = str(Path(__file__).resolve().parents[4] / "datasets" / "code_domain" / "bigcodebench_evalscope")
 
 def ensure_dataset_exists(dataset_id):
     dataset_path = Path(dataset_id)
     if not dataset_path.exists():
-        return
+        dataset_path.mkdir(parents=True, exist_ok=True)
         
     # Check if jsonl or csv files exist
     has_subset = False
-    for subset in ['train', 'test']:
+    for subset in ['in_domain', 'out_domain']:
         for ext in ['jsonl', 'csv']:
             if (dataset_path / f"{subset}.{ext}").exists():
                 has_subset = True
@@ -50,8 +50,8 @@ def ensure_dataset_exists(dataset_id):
             train_ds, test_ds = get_code_dataset()
             
             # Save to jsonl
-            train_ds.to_json(dataset_path / "train.jsonl")
-            test_ds.to_json(dataset_path / "test.jsonl")
+            train_ds.to_json(dataset_path / "in_domain.jsonl")
+            test_ds.to_json(dataset_path / "out_domain.jsonl")
             logger.info("Dataset conversion completed.")
             
         except ImportError as e:
@@ -67,7 +67,7 @@ ensure_dataset_exists(DEFAULT_DATASET_ID)
         dataset_id=DEFAULT_DATASET_ID,
         pretty_name='BigCodeBench',
         tags=[Tags.CODING],
-        subset_list=['train', 'test'],
+        subset_list=['in_domain', 'out_domain'],
         metric_list=['acc'],
         aggregation='mean_and_pass_at_k',
         few_shot_num=0,
@@ -80,6 +80,9 @@ class BigCodeBenchAdapter(DefaultDataAdapter):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+
+    def load_from_disk(self, use_local_loader: bool = True):
+        return super().load_from_disk(use_local_loader=use_local_loader)
 
     def record_to_sample(self, record: Dict[str, Any]) -> Sample:
         """
@@ -127,10 +130,10 @@ class BigCodeBenchAdapter(DefaultDataAdapter):
         from .utils import check_correctness, TIMEOUT_LIMIT
 
         problem = {
-            'task_id': task_state.sample.metadata['task_id'],
-            'prompt': task_state.sample.metadata['code_prompt'],
-            'entry_point': task_state.sample.metadata['entry_point'],
-            'test': task_state.sample.metadata['test']
+            'task_id': task_state.metadata['task_id'],
+            'prompt': task_state.metadata['code_prompt'],
+            'entry_point': task_state.metadata['entry_point'],
+            'test': task_state.metadata['test']
         }
         
         timeout = self.review_timeout if self.review_timeout else TIMEOUT_LIMIT
