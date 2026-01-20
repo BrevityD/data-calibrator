@@ -107,16 +107,32 @@ class BigCodeBenchAdapter(DefaultDataAdapter):
     
     def extract_answer(self, prediction: str, task_state: TaskState) -> str:
         """Extract code from the prediction."""
-        return self._postprocess(prediction)
-    
+        return self._postprocess(prediction, task_state.metadata.get('entry_point'))
     
     @classmethod
-    def _postprocess(cls, text: str) -> str:
-        """Extract code from markdown code blocks."""
-        blocks = re.findall(r'```\w*\n(.*?)```', text, re.DOTALL)
-        if len(blocks) >= 1:
-            text = blocks[-1]
-        return text
+    def _postprocess(cls, text: str, entry_point: str = None) -> str:
+        """Extract code from markdown code blocks and handle CoT."""
+        # 1. Remove think tags
+        text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
+        
+        # 2. Extract code blocks
+        blocks = re.findall(r'```(?:\w+)?\n(.*?)\n```', text, re.DOTALL)
+        
+        if not blocks:
+            # If no blocks, try to find code-like content or return trimmed text
+            return text.strip()
+            
+        if len(blocks) == 1:
+            return blocks[0]
+            
+        # 3. If multiple blocks, try to find the one containing the entry point
+        if entry_point:
+            for block in blocks:
+                if f'def {entry_point}' in block:
+                    return block
+        
+        # Default to the first block instead of the last one, as models often put examples in later blocks
+        return blocks[0]
     
     def match_score(
             self, original_prediction: str, filtered_prediction: str, reference: str, task_state: TaskState
@@ -129,6 +145,31 @@ class BigCodeBenchAdapter(DefaultDataAdapter):
         assert not self.use_sandbox, 'BigCodeBench currently only supports non-sandboxed evaluation.'
         from .utils import check_correctness, TIMEOUT_LIMIT
 
+        # BigCodeBench specific: the completion should not contain the prompt prefix 
+        # to avoid double definitions when concatenated in utils.py
+        code_prompt = task_state.metadata['code_prompt']
+        
+        # Clean up filtered_prediction: if it repeats the code_prompt, we try to extract only the body
+        # or handle it in check_correctness. 
+        # For BigCodeBench, utils.py does: full_code = prompt + completion
+        # If completion contains prompt, it's a syntax error.
+        
+        cleaned_completion = filtered_prediction
+        if cleaned_completion.startswith(code_prompt.strip()):
+            cleaned_completion = cleaned_completion[len(code_prompt.strip()):].lstrip()
+        elif f"def {task_state.metadata['entry_point']}" in cleaned_completion:
+            # If it contains the function definition, it's safer to use it as a standalone script
+            # but BigCodeBench utils.py always prepends prompt.
+            # We'll strip the prefix lines from cleaned_completion
+            lines = cleaned_completion.split('\n')
+            entry_line_idx = -1
+            for i, line in enumerate(lines):
+                if line.strip().startswith(f"def {task_state.metadata['entry_point']}"):
+                    entry_line_idx = i
+                    break
+            if entry_line_idx != -1:
+                cleaned_completion = '\n'.join(lines[entry_line_idx+1:])
+
         problem = {
             'task_id': task_state.metadata['task_id'],
             'prompt': task_state.metadata['code_prompt'],
@@ -137,7 +178,7 @@ class BigCodeBenchAdapter(DefaultDataAdapter):
         }
         
         timeout = self.review_timeout if self.review_timeout else TIMEOUT_LIMIT
-        result = check_correctness(problem, filtered_prediction, timeout)
+        result = check_correctness(problem, cleaned_completion, timeout)
 
         # set score values
         score.value = {'acc': 1.0 if result['passed'] else 0.0}
