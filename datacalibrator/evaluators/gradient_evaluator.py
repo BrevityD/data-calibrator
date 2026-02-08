@@ -11,7 +11,7 @@ class GradientEvaluator:
             self.model.eval()
             self.model.to(self.device)
 
-    def evaluate(self, dataset, batch_size=4, max_samples=None, max_length=2048, description="Evaluating Gradients"):
+    def evaluate(self, dataset, batch_size=4, max_samples=None, max_length=8192, description="Evaluating Gradients"):
         """
         Computes the gradient of the loss on the dataset w.r.t model parameters
         and returns statistics of this aggregated gradient.
@@ -85,11 +85,14 @@ class GradientEvaluator:
         )
         
         # Zero gradients before accumulation
-        self.model.zero_grad()
+        self.model.zero_grad(set_to_none=True)
         
         total_loss_sum = 0.0
         total_tokens = 0
         
+        # Accumulate gradients on CPU to save GPU memory and avoid leaks
+        # We assume the parameter order is deterministic (it is in PyTorch)
+        acc_grads = [None] * len(list(self.model.parameters()))
         for batch in tqdm(dataloader, desc=description):
             batch = {k: v.to(self.device) for k, v in batch.items()}
             
@@ -109,7 +112,8 @@ class GradientEvaluator:
                 continue
 
             # Forward pass
-            outputs = self.model(**batch)
+            # Disable cache to save memory
+            outputs = self.model(**batch, use_cache=False)
             loss = outputs.loss
             
             # loss is the mean loss per token. 
@@ -118,25 +122,37 @@ class GradientEvaluator:
             scaled_loss = loss * num_tokens
             
             scaled_loss.backward()
-            
+
             total_loss_sum += scaled_loss.item()
             total_tokens += num_tokens
+
+            # Move gradients to CPU and accumulate in float16 to save memory
+            for i, param in enumerate(self.model.parameters()):
+                if param.grad is not None:
+                    # Detach and move to CPU, convert to float16
+                    grad_cpu = param.grad.detach().cpu().float()
+                    if acc_grads[i] is None:
+                        acc_grads[i] = grad_cpu
+                    else:
+                        acc_grads[i] += grad_cpu
+                    # Free GPU memory for this grad immediately
+                    param.grad = None
+            
+            # Explicitly delete large objects
+            del outputs, loss, scaled_loss
             
         avg_loss = total_loss_sum / total_tokens if total_tokens > 0 else 0.0
         
         # Collect gradients
         all_grads = []
-        for param in self.model.parameters():
-            if param.grad is not None:
+        for g in acc_grads:
+            if g is not None:
+                # # Convert back to float32 for division and stats to ensure precision
+                # g = g.float()
                 # Normalize to get gradient of the mean loss (per token)
                 if total_tokens > 0:
-                    param.grad.div_(total_tokens)
-                
-                # Flatten and move to CPU to save GPU memory
-                all_grads.append(param.grad.view(-1).cpu())
-                
-                # Clear grad
-                param.grad = None
+                    g.div_(total_tokens)
+                all_grads.append(g.view(-1))
         
         if not all_grads:
             return {}

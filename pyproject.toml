@@ -8,6 +8,7 @@ dependencies = [
     "datasets>=4.4.2",
     "loguru>=0.7.3",
     "math-verify[antlr4-9-3]>=0.8.0",
+    "matplotlib>=3.10.8",
     "pytest>=9.0.2",
     "torch==2.8.0",
     "tqdm>=4.67.1",

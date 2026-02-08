@@ -218,3 +218,4 @@ hf_cache/
 datasets/**
 !datasets/**/*.py
 !datasets/**/*.md
+*.png
