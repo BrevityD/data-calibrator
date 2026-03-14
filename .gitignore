@@ -211,6 +211,8 @@ outputs/
 unsloth_compiled_cache/
 wandb/
 checkpoints/
+.pth
+*/.pth
 
 # data
 data/
