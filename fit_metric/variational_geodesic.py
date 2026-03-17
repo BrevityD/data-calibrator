@@ -12,15 +12,16 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 
-# 从 draw_geo.py 复用基础设施
-from draw_geo import (
+# 从 geo_common 复用基础设施
+from geo_common import (
+    init,
+    get_device,
+    get_dtype,
     metric_tensor_xy,
     metric_tensor_xy_batch,
     metric_mat,
     compute_logdet_grid,
     draw_metric_ellipses,
-    device,
-    dtype,
 )
 
 
@@ -89,7 +90,7 @@ def variational_geodesic_to_line(
     # 自由变量：内部节点 (q_1 ... q_{N-1}) 的 xy + 终点 y
     # 共 2*(N-1) + 1 个标量
     n_free = 2 * (N - 1) + 1
-    params = torch.zeros(n_free, dtype=dtype, device=device, requires_grad=True)
+    params = torch.zeros(n_free, dtype=get_dtype(), device=get_device(), requires_grad=True)
 
     # 填入初始值
     with torch.no_grad():
@@ -98,7 +99,7 @@ def variational_geodesic_to_line(
             params[2 * (i - 1) + 1] = ip[i, 1]
         params[-1] = y_init  # 终点 y
 
-    q0 = torch.tensor([x0, y0], dtype=dtype, device=device)  # 固定起点
+    q0 = torch.tensor([x0, y0], dtype=get_dtype(), device=get_device())  # 固定起点
 
     def build_path(p):
         """从自由变量构建完整路径 (N+1, 2)，不做硬 clamp"""
@@ -219,7 +220,7 @@ def compute_variational_arc_length(path):
     # 批量计算所有中点的度规张量
     mids = 0.5 * (path[:-1] + path[1:])                        # (M-1, 2)
     mids = np.clip(mids, 0.0, 1.0)
-    mids_t = torch.tensor(mids, dtype=dtype, device=device)
+    mids_t = torch.tensor(mids, dtype=get_dtype(), device=get_device())
     with torch.no_grad():
         G_all = metric_tensor_xy_batch(mids_t).cpu().numpy()    # (M-1, 2, 2)
     dq = path[1:] - path[:-1]                                   # (M-1, 2)
@@ -264,7 +265,7 @@ def batch_coarse_search(
     n_free = 2 * (N - 1) + 1
 
     # 初始化 (K, n_free) 参数矩阵
-    all_params = torch.zeros(K, n_free, dtype=dtype, device=device)
+    all_params = torch.zeros(K, n_free, dtype=get_dtype(), device=get_device())
     for k, y_c in enumerate(y_candidates):
         for i in range(1, N):
             t = i / N
@@ -273,7 +274,7 @@ def batch_coarse_search(
         all_params[k, -1] = y_c  # 终点 y
     all_params = all_params.detach().requires_grad_(True)
 
-    q0 = torch.tensor([x0, y0], dtype=dtype, device=device)  # 固定起点
+    q0 = torch.tensor([x0, y0], dtype=get_dtype(), device=get_device())  # 固定起点
 
     def build_all_paths(params):
         """从 (K, n_free) 构建 (K, N+1, 2) 路径"""
@@ -686,6 +687,8 @@ def plot_variational_geodesic_to_line(
 # 5. 主程序
 # =========================================================
 if __name__ == '__main__':
+    init(device_str="cuda:4")
+
     start = (0.9, 0.9)
     plot_variational_geodesic_to_line(
         start=start,
