@@ -19,6 +19,7 @@ from matplotlib.patches import Ellipse
 # 0. 随机种子
 # =========================================================
 def seed_everything(seed: int = 42) -> int:
+    """固定所有随机种子（Python、NumPy、PyTorch），确保实验可复现。"""
     random.seed(seed)
     os.environ["PYTHONHASHSEED"] = str(seed)
     np.random.seed(seed)
@@ -33,6 +34,8 @@ def seed_everything(seed: int = 42) -> int:
 # 1. 网络结构
 # =========================================================
 class SmoothResidualBlock(nn.Module):
+    """带 SiLU 激活的残差块，保证输出光滑性。"""
+
     def __init__(self, hidden_dim):
         super().__init__()
         self.block = nn.Sequential(
@@ -47,6 +50,11 @@ class SmoothResidualBlock(nn.Module):
 
 
 class VectorField(nn.Module):
+    """2D → 2D 向量场网络，用于拟合数据混合比例到指标的映射。
+
+    结构: Linear(2→48) + SiLU → 2×SmoothResidualBlock → Linear(48→2)
+    """
+
     def __init__(self):
         super(VectorField, self).__init__()
         hidden_dim = 48
@@ -85,7 +93,14 @@ def init(
     math_model_path='/public/home/jza/data_calibrate/data_mixture/metric_fit/v1.pth',
     code_model_path='/public/home/jza/data_calibrate/data_mixture/metric_fit/v2.pth',
 ):
-    """延迟初始化：设置 device、加载模型、构建 jacrev。"""
+    """延迟初始化：设置 device、加载两个向量场模型、构建度规张量的 jacrev。
+
+    参数:
+        device_str: CUDA 设备字符串，如 'cuda:4'
+        seed: 随机种子
+        math_model_path: 数学指标向量场模型权重路径
+        code_model_path: 代码指标向量场模型权重路径
+    """
     global _device, _dtype, _math_model, _code_model, _jac_metric_tensor_xy
 
     seed_everything(seed)
@@ -106,11 +121,13 @@ def init(
 
 
 def get_device():
+    """返回当前 torch.device，未调用 init() 时抛出 AssertionError。"""
     assert _device is not None, "geo_common.init() has not been called"
     return _device
 
 
 def get_dtype():
+    """返回当前计算精度（默认 torch.float64）。"""
     return _dtype
 
 
@@ -118,6 +135,15 @@ def get_dtype():
 # 3. 度规张量 G(x,y) = (J J^T)^(-1)
 # =========================================================
 def metric_tensor_xy(xy, eps=1e-8):
+    """计算单点度规张量 G(x,y) = (J J^T)^{-1}。
+
+    参数:
+        xy: shape (2,) 的 tensor，坐标 (x, y) ∈ [0,1]²
+        eps: 正则化常数，防止 J J^T 奇异
+
+    返回:
+        G: shape (2,2) 的度规张量
+    """
     loc = xy.unsqueeze(0)
     v1 = _math_model(loc)
     v2 = _code_model(loc)
@@ -129,6 +155,15 @@ def metric_tensor_xy(xy, eps=1e-8):
 
 
 def metric_tensor_xy_batch(xy_batch, eps=1e-8):
+    """批量计算度规张量。
+
+    参数:
+        xy_batch: shape (B, 2) 的 tensor
+        eps: 正则化常数
+
+    返回:
+        G: shape (B, 2, 2) 的度规张量
+    """
     v1 = _math_model(xy_batch)
     v2 = _code_model(xy_batch)
     J = torch.stack([v1, v2], dim=-1)
@@ -139,6 +174,7 @@ def metric_tensor_xy_batch(xy_batch, eps=1e-8):
 
 
 def metric_mat(x, y, eps=1e-8):
+    """便捷接口：给定标量坐标 (x, y) ∈ [0,1]，返回 detached 度规张量。"""
     assert 0.0 <= x <= 1.0 and 0.0 <= y <= 1.0, "输入坐标必须在 [0,1]"
     xy = torch.tensor([x, y], dtype=_dtype, device=_device)
     G = metric_tensor_xy(xy, eps=eps)
@@ -149,6 +185,14 @@ def metric_mat(x, y, eps=1e-8):
 # 4. Christoffel symbols
 # =========================================================
 def christoffel_symbols(x, y):
+    """计算 Christoffel 符号 Γ^k_{ij}(x, y)。
+
+    通过 jacrev 自动微分度规张量得到 ∂g_{jl}/∂x^a，
+    再由标准公式 Γ^k_{ij} = ½ g^{kl}(∂_i g_{jl} + ∂_j g_{il} - ∂_l g_{ij}) 计算。
+
+    返回:
+        Gamma: shape (2, 2, 2) 的 tensor，Gamma[k, i, j] = Γ^k_{ij}
+    """
     xy = torch.tensor([x, y], dtype=_dtype, device=_device, requires_grad=True)
     G = metric_tensor_xy(xy)
     Ginv = torch.linalg.inv(G)
@@ -169,6 +213,11 @@ def christoffel_symbols(x, y):
 # 5. 测地线 ODE
 # =========================================================
 def geodesic_rhs(t, Y):
+    """测地线 ODE 右端项，供 scipy.integrate.solve_ivp 使用。
+
+    状态 Y = [x, y, u, v]，其中 (x,y) 为位置，(u,v) 为速度。
+    当 (x,y) 越出 [0,1]² 时返回零向量（配合边界事件停止积分）。
+    """
     x, y, u, v = Y
     if not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0):
         return [0.0, 0.0, 0.0, 0.0]
@@ -184,6 +233,7 @@ def geodesic_rhs(t, Y):
 # 6. 边界停止事件
 # =========================================================
 def hit_boundary(t, Y):
+    """边界停止事件：当轨迹触及 [0,1]² 边界时终止积分。"""
     x, y, u, v = Y
     return min(x, y, 1.0 - x, 1.0 - y)
 
@@ -195,6 +245,14 @@ hit_boundary.direction = -1
 # 7. 初值测地线
 # =========================================================
 def solve_geodesic_ivp(x0, y0, u0, v0, T=1.0, max_step=0.01, rtol=1e-6, atol=1e-8):
+    """求解测地线初值问题。
+
+    从 (x0, y0) 出发，初速度 (u0, v0)，用 RK45 积分到 t=T。
+    遇到 [0,1]² 边界时自动停止。
+
+    返回:
+        sol: scipy OdeResult，sol.y 形状 (4, N_pts)
+    """
     sol = solve_ivp(
         geodesic_rhs,
         t_span=(0.0, T),
@@ -212,6 +270,17 @@ def solve_geodesic_ivp(x0, y0, u0, v0, T=1.0, max_step=0.01, rtol=1e-6, atol=1e-
 # 8. 度规椭圆
 # =========================================================
 def metric_ellipse_data(x, y, scale=0.06):
+    """计算点 (x,y) 处度规椭圆的绘图参数。
+
+    度规椭圆由 v^T G v = 1 定义，半轴长度为 1/sqrt(λ_i)。
+    scale 控制椭圆在图上的缩放大小。
+
+    返回:
+        width, height: 椭圆宽高（已乘 2×scale）
+        angle: 长轴旋转角度（度）
+        eigvals: G 的特征值（升序）
+        eigvecs: 对应特征向量
+    """
     G = metric_mat(x, y).cpu().numpy()
     eigvals, eigvecs = np.linalg.eigh(G)
     order = np.argsort(eigvals)
@@ -227,6 +296,7 @@ def metric_ellipse_data(x, y, scale=0.06):
 
 
 def draw_metric_ellipses(ax, n_grid=9, scale=0.06, color='white', alpha=0.85, linewidth=1.0):
+    """在 matplotlib Axes 上绘制 n_grid × n_grid 的度规椭圆网格。"""
     xs = np.linspace(0.08, 0.92, n_grid)
     ys = np.linspace(0.08, 0.92, n_grid)
     for x in xs:
@@ -246,6 +316,12 @@ def draw_metric_ellipses(ax, n_grid=9, scale=0.06, color='white', alpha=0.85, li
 # 9. log(det G) heatmap
 # =========================================================
 def compute_logdet_grid(n=120):
+    """在 [0,1]² 上计算 n×n 网格的 log(det G) 值，用于热力图可视化。
+
+    返回:
+        xs, ys: 长度为 n 的坐标数组
+        Z: shape (n, n) 的 log(det G) 值矩阵（非正定处为 NaN）
+    """
     xs = np.linspace(0.0, 1.0, n)
     ys = np.linspace(0.0, 1.0, n)
     Z = np.zeros((n, n), dtype=np.float64)
@@ -264,6 +340,14 @@ def compute_logdet_grid(n=120):
 # 10. 弧长
 # =========================================================
 def compute_geodesic_arc_length(sol):
+    """计算 solve_ivp 解的度规弧长 L = Σ sqrt(dq^T G(mid) dq)。
+
+    参数:
+        sol: scipy OdeResult，sol.y shape (4, N_pts)
+
+    返回:
+        arc_length: float，度规意义下的弧长
+    """
     xs = sol.y[0]
     ys = sol.y[1]
     n_pts = len(xs)
@@ -280,6 +364,7 @@ def compute_geodesic_arc_length(sol):
 
 
 def compute_euclidean_arc_length(sol):
+    """计算 solve_ivp 解的欧氏弧长，用于与度规弧长对比。"""
     xs = sol.y[0]
     ys = sol.y[1]
     dx = np.diff(xs)

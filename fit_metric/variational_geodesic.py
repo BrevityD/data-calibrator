@@ -249,11 +249,27 @@ def batch_coarse_search(
     tol=1e-7,
     verbose=True,
 ):
-    """
-    用 Adam 并行优化 K 条路径，共享 NN forward pass。
+    """用 Adam 并行优化 K 条从 start 到 x=x_target 的离散路径。
+
+    所有路径共享同一次 NN forward pass 以提高效率。
+    使用对数障碍函数约束路径点在 [0,1]² 内，并逐步退火。
+
+    参数:
+        start: (x0, y0) 起点坐标
+        x_target: 目标直线 x = x_target
+        y_candidates: 长度为 K 的终点 y 初始猜测数组
+        K: 并行路径数（y_candidates 为 None 时使用）
+        N: 每条路径的离散段数
+        max_iter: Adam 最大迭代次数
+        lr: Adam 学习率
+        barrier_mu: 对数障碍初始权重
+        barrier_anneal: 障碍退火因子
+        barrier_anneal_every: 障碍退火间隔
+        tol: 收敛容差（所有路径能量相对变化）
+        verbose: 是否打印优化过程
 
     返回:
-        candidates: list of dict, 按 arc_length 排序
+        candidates: list of dict，按 arc_length 升序排列
     """
     if y_candidates is None:
         y_candidates = np.linspace(0.05, 0.95, K)
@@ -389,12 +405,25 @@ def multi_start_variational_geodesic_to_line(
     """
     多起点变分测地线搜索，避免局部最优。
 
-    阶段1：对 K 个 y 候选分别求解（粗搜索）
-    阶段2：取 top_k 个最优结果用更多离散点精化
+    阶段1（粗搜索）：用 batch_coarse_search 对 K 个终点 y 候选并行 Adam 优化
+    阶段2（精化）：取 top_k 个最优结果，用更多离散点 (refine_N) 进行 L-BFGS 精化
+
+    参数:
+        start: (x0, y0) 起点坐标
+        x_target: 目标直线 x = x_target
+        y_candidates: 终点 y 候选数组，None 时自动生成
+        K: 候选数量
+        N: 粗搜索离散段数
+        refine_top_k: 精化阶段保留的最优候选数
+        refine_N: 精化阶段离散段数
+        refine_max_iter: 精化阶段最大迭代次数
 
     返回:
-        best_path, best_energy, best_arc_length, best_info, candidates
-        candidates: list of dict，每个候选的摘要
+        best_path: numpy array (refine_N+1, 2) 最优路径
+        best_energy: 最终离散能量
+        best_arc_length: 度规弧长
+        best_info: dict 优化细节
+        candidates: list of dict，粗搜索阶段所有候选摘要
     """
     if y_candidates is None:
         y_candidates = np.linspace(0.05, 0.95, K)
@@ -547,9 +576,25 @@ def plot_variational_geodesic_to_line(
     save_path=None,
     log_path=None,
 ):
-    """
-    求解并可视化从 start 到直线 x=x_target 的变分测地线。
-    当提供 y_candidates 或 K 时，启用多起点搜索。
+    """求解并可视化从 start 到直线 x=x_target 的变分测地线。
+
+    当提供 y_candidates 时启用多起点搜索（batch_coarse_search + L-BFGS 精化）；
+    否则从单一初始路径求解。绘制 log(det G) 热力图、度规椭圆、候选路径和最优路径，
+    并进行横截性检验。
+
+    参数:
+        start: (x0, y0) 起点坐标
+        x_target: 目标直线 x = x_target
+        y_init: 单起点模式下终点 y 的初始猜测
+        y_candidates: 多起点模式下终点 y 候选数组
+        save_path: 图片保存路径（None 则不保存）
+        log_path: JSON 日志保存路径
+
+    返回:
+        path: numpy array 最优路径
+        energy: 最终离散能量
+        arc_length: 度规弧长
+        info: dict 优化细节
     """
     use_multi = y_candidates is not None
 
