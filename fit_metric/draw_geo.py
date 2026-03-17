@@ -75,7 +75,7 @@ seed_everything(42)
 math_model_path = '/public/home/jza/data_calibrate/data_mixture/metric_fit/v1.pth'
 code_model_path = '/public/home/jza/data_calibrate/data_mixture/metric_fit/v2.pth'
 
-device = torch.device('cuda:3' if torch.cuda.is_available() else 'cpu')
+device = torch.device('cuda:4' if torch.cuda.is_available() else 'cpu')
 dtype = torch.float64
 
 math_model = VectorField().to(device).double()
@@ -104,6 +104,21 @@ def metric_tensor_xy(xy, eps=1e-8):
     A = J @ J.T
     A = A + eps * torch.eye(2, dtype=dtype, device=device)
     G = torch.linalg.inv(A)
+    return G
+
+
+def metric_tensor_xy_batch(xy_batch, eps=1e-8):
+    """
+    批量计算度规张量。
+    xy_batch: (B, 2) tensor
+    返回: (B, 2, 2) tensor
+    """
+    v1 = math_model(xy_batch)          # (B, 2)
+    v2 = code_model(xy_batch)          # (B, 2)
+    J = torch.stack([v1, v2], dim=-1)  # (B, 2, 2)
+    A = J @ J.transpose(-1, -2)       # (B, 2, 2)
+    A = A + eps * torch.eye(2, dtype=dtype, device=device)
+    G = torch.linalg.inv(A)           # (B, 2, 2)
     return G
 
 
@@ -222,7 +237,7 @@ def shooting_geodesic(start, target, T=1.0, init_vel=None, method='hybr', maxite
         init_vel = np.array([x1 - x0, y1 - y0], dtype=np.float64)
 
     fun = lambda vel: endpoint_error(vel, start, target, T=T)
-    options = {'maxiter': maxiter}
+    options = {'maxfev': maxiter}
     result = root(fun, init_vel, method=method, options=options)
     return result
 
@@ -961,25 +976,17 @@ def plot_geodesic_fan_to_vertical_line(
 # =========================================================
 # 15. 主程序
 # =========================================================
+if __name__ == "__main__":
+    start = (0.9, 0.9)
+    target = (0.2, 0.2)
 
-start = (0.9, 0.9)
-
-all_results = plot_geodesic_fan_to_vertical_line(
-    start=start,
-    x_target=0.2,
-    y_min=0.05,
-    y_max=0.75,
-    T_num=12,                  # 这里改成你想画的条数
-    ode_T=1.0,                 # 这里是积分终点时间，不是条数
-    method='hybr',
-    show_heatmap=True,
-    heatmap_n=120,
-    ellipse_grid=9,
-    ellipse_scale=0.05,
-    max_step=0.01,
-    rtol=1e-6,
-    atol=1e-8,
-    strict_open_interval=True, # True -> y in (0.2, 0.6)
-    save_path='geodesic_fan_x02.png',
-    log_path='geodesic_fan_x02_log.json'
-)
+    result, sol = plot_geodesic_with_metric_ellipses(
+        start=start,
+        target=target,
+        ode_T=1.0,
+        show_heatmap=True,
+        heatmap_n=120,
+        ellipse_grid=9,
+        ellipse_scale=0.05,
+        save_path='geodesic_09_to_02.png'
+    )

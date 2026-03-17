@@ -1,0 +1,311 @@
+{
+  "start": [
+    0.9,
+    0.9
+  ],
+  "x_target": 0.2,
+  "y_min": 0.05,
+  "y_max": 0.75,
+  "T_num": 12,
+  "ode_T": 1.0,
+  "total_elapsed_s": 440.3054358959198,
+  "geodesics": [
+    {
+      "index": 1,
+      "target": [
+        0.2,
+        0.05
+      ],
+      "final_location": [
+        0.20000000000000115,
+        0.04999999999999872
+      ],
+      "initial_velocity": [
+        -1.1196897654183446,
+        -1.1821921054664692
+      ],
+      "endpoint_error_norm": 1.715479263434072e-15,
+      "metric_arc_length": 6.253238363055251,
+      "euclidean_arc_length": 1.154676386714292,
+      "shooting_time_s": 0.0,
+      "ivp_time_s": 4.507158279418945,
+      "arc_len_time_s": 0.07378196716308594,
+      "total_line_time_s": 4.580981016159058,
+      "shooting_success": true,
+      "converged": true
+    },
+    {
+      "index": 2,
+      "target": [
+        0.2,
+        0.11363636363636363
+      ],
+      "final_location": [
+        0.19999999999999513,
+        0.11363636363635905
+      ],
+      "initial_velocity": [
+        -1.0371437462311446,
+        -0.956502885221812
+      ],
+      "endpoint_error_norm": 6.696000259655954e-15,
+      "metric_arc_length": 5.1215824852706975,
+      "euclidean_arc_length": 1.0649299121906937,
+      "shooting_time_s": 0.0,
+      "ivp_time_s": 2.9235286712646484,
+      "arc_len_time_s": 0.07286214828491211,
+      "total_line_time_s": 2.9964182376861572,
+      "shooting_success": true,
+      "converged": true
+    },
+    {
+      "index": 3,
+      "target": [
+        0.2,
+        0.17727272727272725
+      ],
+      "final_location": [
+        0.19999999999999843,
+        0.17727272727273108
+      ],
+      "initial_velocity": [
+        -1.1518777554832225,
+        -0.84793760373706
+      ],
+      "endpoint_error_norm": 4.1441407432771706e-15,
+      "metric_arc_length": 5.292096316907615,
+      "euclidean_arc_length": 1.0429336496439257,
+      "shooting_time_s": 0.0,
+      "ivp_time_s": 2.8717234134674072,
+      "arc_len_time_s": 0.07284069061279297,
+      "total_line_time_s": 2.9445927143096924,
+      "shooting_success": true,
+      "converged": true
+    },
+    {
+      "index": 4,
+      "target": [
+        0.2,
+        0.2409090909090909
+      ],
+      "final_location": [
+        0.20000000000000678,
+        0.2409090909090207
+      ],
+      "initial_velocity": [
+        -1.1361543946288057,
+        -0.8302303396798112
+      ],
+      "endpoint_error_norm": 7.051979542400457e-14,
+      "metric_arc_length": 5.221810479530337,
+      "euclidean_arc_length": 1.0349373059718805,
+      "shooting_time_s": 0.0,
+      "ivp_time_s": 3.0128173828125,
+      "arc_len_time_s": 0.07419753074645996,
+      "total_line_time_s": 3.0870442390441895,
+      "shooting_success": true,
+      "converged": true
+    },
+    {
+      "index": 5,
+      "target": [
+        0.2,
+        0.3045454545454545
+      ],
+      "final_location": [
+        0.2000000000043742,
+        0.30454545456480875
+      ],
+      "initial_velocity": [
+        -1.1458831534629421,
+        -0.8368136304732894
+      ],
+      "endpoint_error_norm": 1.9842384144999665e-11,
+      "metric_arc_length": 5.267008090015376,
+      "euclidean_arc_length": 1.0102968787187425,
+      "shooting_time_s": 0.0,
+      "ivp_time_s": 3.0216715335845947,
+      "arc_len_time_s": 0.07383060455322266,
+      "total_line_time_s": 3.0955305099487305,
+      "shooting_success": true,
+      "converged": true
+    },
+    {
+      "index": 6,
+      "target": [
+        0.2,
+        0.3681818181818181
+      ],
+      "final_location": [
+        0.20000000010647886,
+        0.3681818184534752
+      ],
+      "initial_velocity": [
+        -1.175352983563602,
+        -0.8581779772194291
+      ],
+      "endpoint_error_norm": 2.917795717054002e-10,
+      "metric_arc_length": 5.402899233367738,
+      "euclidean_arc_length": 0.9951933588188902,
+      "shooting_time_s": 0.0,
+      "ivp_time_s": 3.0785868167877197,
+      "arc_len_time_s": 0.07494807243347168,
+      "total_line_time_s": 3.1535608768463135,
+      "shooting_success": true,
+      "converged": true
+    },
+    {
+      "index": 7,
+      "target": [
+        0.2,
+        0.43181818181818177
+      ],
+      "final_location": [
+        0.20448593476919444,
+        0.4353717203705853
+      ],
+      "initial_velocity": [
+        -1.2098278151771846,
+        -0.8832781327988992
+      ],
+      "endpoint_error_norm": 0.005722870520716477,
+      "metric_arc_length": 5.561314326129253,
+      "euclidean_arc_length": 1.0015647156972023,
+      "shooting_time_s": 0.0,
+      "ivp_time_s": 3.1272621154785156,
+      "arc_len_time_s": 0.07533669471740723,
+      "total_line_time_s": 3.2026243209838867,
+      "shooting_success": true,
+      "converged": true
+    },
+    {
+      "index": 8,
+      "target": [
+        0.2,
+        0.4954545454545454
+      ],
+      "final_location": [
+        0.20000000000645923,
+        0.495454545484265
+      ],
+      "initial_velocity": [
+        -1.2642270190568705,
+        -0.9229674265407963
+      ],
+      "endpoint_error_norm": 3.0413382000759296e-11,
+      "metric_arc_length": 5.810759723674884,
+      "euclidean_arc_length": 1.0342887677956827,
+      "shooting_time_s": 92.06066226959229,
+      "ivp_time_s": 3.090048313140869,
+      "arc_len_time_s": 0.07543563842773438,
+      "total_line_time_s": 95.22618246078491,
+      "shooting_success": true,
+      "converged": true
+    },
+    {
+      "index": 9,
+      "target": [
+        0.2,
+        0.5590909090909091
+      ],
+      "final_location": [
+        0.2000000000081515,
+        0.5590909089193459
+      ],
+      "initial_velocity": [
+        -1.293183257436292,
+        -0.9440962901181529
+      ],
+      "endpoint_error_norm": 1.717567494631763e-10,
+      "metric_arc_length": 5.944026774038802,
+      "euclidean_arc_length": 1.053535197509458,
+      "shooting_time_s": 101.91615533828735,
+      "ivp_time_s": 3.2892417907714844,
+      "arc_len_time_s": 0.07726788520812988,
+      "total_line_time_s": 105.2827033996582,
+      "shooting_success": true,
+      "converged": true
+    },
+    {
+      "index": 10,
+      "target": [
+        0.2,
+        0.6227272727272727
+      ],
+      "final_location": [
+        0.20000000000265913,
+        0.6227272727205451
+      ],
+      "initial_velocity": [
+        -1.2934965392413635,
+        -0.9443165553634553
+      ],
+      "endpoint_error_norm": 7.234071114393307e-12,
+      "metric_arc_length": 5.94616755975762,
+      "euclidean_arc_length": 1.0713740165026695,
+      "shooting_time_s": 75.5817494392395,
+      "ivp_time_s": 3.296786069869995,
+      "arc_len_time_s": 0.07794594764709473,
+      "total_line_time_s": 78.95651912689209,
+      "shooting_success": true,
+      "converged": true
+    },
+    {
+      "index": 11,
+      "target": [
+        0.2,
+        0.6863636363636363
+      ],
+      "final_location": [
+        0.20000000000265913,
+        0.6227272727205451
+      ],
+      "initial_velocity": [
+        -1.2934965392413635,
+        -0.9443165553634553
+      ],
+      "endpoint_error_norm": 0.06363636364309122,
+      "metric_arc_length": 5.94616755975762,
+      "euclidean_arc_length": 1.0713740165026695,
+      "shooting_time_s": 59.37429618835449,
+      "ivp_time_s": 3.3111777305603027,
+      "arc_len_time_s": 0.07761240005493164,
+      "total_line_time_s": 62.76312518119812,
+      "shooting_success": false,
+      "converged": false
+    },
+    {
+      "index": 12,
+      "target": [
+        0.2,
+        0.75
+      ],
+      "final_location": [
+        0.20000000000265913,
+        0.6227272727205451
+      ],
+      "initial_velocity": [
+        -1.2934965392413635,
+        -0.9443165553634553
+      ],
+      "endpoint_error_norm": 0.12727272727945493,
+      "metric_arc_length": 5.94616755975762,
+      "euclidean_arc_length": 1.0713740165026695,
+      "shooting_time_s": 59.31017589569092,
+      "ivp_time_s": 3.336411714553833,
+      "arc_len_time_s": 0.0781393051147461,
+      "total_line_time_s": 62.72476077079773,
+      "shooting_success": false,
+      "converged": false
+    }
+  ],
+  "summary": {
+    "avg_shooting_time_s": 32.35358659426371,
+    "avg_ivp_time_s": 3.2388678193092346,
+    "avg_line_time_s": 35.66783690452576,
+    "avg_endpoint_error": 0.016385996830364322,
+    "max_endpoint_error": 0.12727272727945493,
+    "avg_metric_arc_length": 5.642769872605235,
+    "avg_euclidean_arc_length": 1.0505398518807316
+  }
+}
