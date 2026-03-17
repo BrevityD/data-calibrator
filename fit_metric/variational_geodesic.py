@@ -39,13 +39,13 @@ def variational_geodesic_to_line(
     max_iter=300,
     tol=1e-8,
     grad_tol=1e-6,
-    barrier_mu=1e-3,
-    barrier_anneal=0.5,
-    barrier_anneal_every=50,
     verbose=True,
 ):
     """
     用 L-BFGS 最小化离散能量，求从 start 到直线 x=x_target 的最短测地线。
+
+    使用 sigmoid 重参数化：优化无约束的 raw_params，通过 sigmoid 映射到 (eps, 1-eps)，
+    使 L-BFGS 始终在光滑无约束空间工作。
 
     参数:
         start: (x0, y0) 起点坐标
@@ -57,9 +57,6 @@ def variational_geodesic_to_line(
         max_iter: 最大迭代次数
         tol: 收敛容差（能量相对变化）
         grad_tol: 梯度范数收敛容差
-        barrier_mu: 对数障碍初始权重
-        barrier_anneal: 障碍退火因子（每 barrier_anneal_every 步乘以此值）
-        barrier_anneal_every: 障碍退火间隔
         verbose: 是否打印优化过程
 
     返回:
@@ -72,7 +69,12 @@ def variational_geodesic_to_line(
     if y_init is None:
         y_init = y0
 
-    eps = 1e-4  # 坐标边界 clamp 余量
+    eps = 1e-4  # 坐标边界余量
+
+    def to_raw(x):
+        """inverse sigmoid: 将 (eps, 1-eps) 映射到无约束空间 ℝ"""
+        x_c = np.clip(x, eps * 2, 1 - eps * 2)
+        return np.log((x_c - eps) / (1 - eps - x_c))
 
     # 初始路径
     if init_path is not None:
@@ -89,43 +91,36 @@ def variational_geodesic_to_line(
             ip[i, 1] = y0 * (1 - t) + y_init * t
 
     # 自由变量：内部节点 (q_1 ... q_{N-1}) 的 xy + 终点 y
-    # 共 2*(N-1) + 1 个标量
+    # 共 2*(N-1) + 1 个标量，在无约束空间 ℝ 中优化
     n_free = 2 * (N - 1) + 1
     params = torch.zeros(n_free, dtype=get_dtype(), device=get_device(), requires_grad=True)
 
-    # 填入初始值
+    # 用 inverse sigmoid 填入初始值
     with torch.no_grad():
         for i in range(1, N):
-            params[2 * (i - 1)] = ip[i, 0]
-            params[2 * (i - 1) + 1] = ip[i, 1]
-        params[-1] = y_init  # 终点 y
+            params[2 * (i - 1)] = to_raw(ip[i, 0])
+            params[2 * (i - 1) + 1] = to_raw(ip[i, 1])
+        params[-1] = to_raw(y_init)  # 终点 y
 
     q0 = torch.tensor([x0, y0], dtype=get_dtype(), device=get_device())  # 固定起点
 
     def build_path(p):
-        """从自由变量构建完整路径 (N+1, 2)，不做硬 clamp"""
-        inner = p[:-1].reshape(N - 1, 2)                        # (N-1, 2)
-        y_end = p[-1:]
+        """从无约束自由变量经 sigmoid 映射构建完整路径 (N+1, 2)"""
+        coords = torch.sigmoid(p) * (1 - 2 * eps) + eps  # 映射到 (eps, 1-eps)
+        inner = coords[:-1].reshape(N - 1, 2)                        # (N-1, 2)
+        y_end = coords[-1:]
         x_end = torch.full_like(y_end, x_target)
         endpoint = torch.cat([x_end, y_end])                    # (2,)
         return torch.cat([q0.unsqueeze(0), inner, endpoint.unsqueeze(0)], dim=0)
 
-    mu_holder = [barrier_mu]  # mutable container for closure access
-
     def compute_energy(p):
-        """离散能量 E = Σ (dq^T G(mid) dq) + soft barrier"""
+        """离散能量 E = Σ (dq^T G(mid) dq)"""
         path = build_path(p)                                    # (N+1, 2)
         dq = path[1:] - path[:-1]                               # (N, 2)
         mids = (0.5 * (path[:-1] + path[1:])).clamp(eps, 1 - eps)  # (N, 2)
         G = metric_tensor_xy_batch(mids)                        # (N, 2, 2)
         Gdq = torch.einsum('bij,bj->bi', G, dq)                # (N, 2)
         E = torch.einsum('bi,bi->', dq, Gdq)                    # scalar
-
-        # 对数障碍：对内部节点和终点 y 施加 soft boundary
-        if mu_holder[0] > 0:
-            free_coords = path[1:].reshape(-1)                   # 所有自由坐标
-            barrier = -(torch.log(free_coords - eps) + torch.log(1 - eps - free_coords)).sum()
-            E = E + mu_holder[0] * barrier
         return E
 
     # L-BFGS 优化
@@ -139,12 +134,6 @@ def variational_geodesic_to_line(
     t_start = time.time()
 
     for iteration in range(max_iter):
-        # barrier 退火
-        if iteration > 0 and iteration % barrier_anneal_every == 0:
-            mu_holder[0] *= barrier_anneal
-            if verbose:
-                print(f"  barrier mu annealed to {mu_holder[0]:.2e}")
-
         def closure():
             optimizer.zero_grad()
             E = compute_energy(params)
@@ -174,13 +163,7 @@ def variational_geodesic_to_line(
     # 提取最优路径
     with torch.no_grad():
         final_path = build_path(params).detach().cpu().numpy()
-        # 计算纯测地线能量（不含 barrier）
-        path_t = build_path(params)
-        dq = path_t[1:] - path_t[:-1]
-        mids = (0.5 * (path_t[:-1] + path_t[1:])).clamp(eps, 1 - eps)
-        G = metric_tensor_xy_batch(mids)
-        Gdq = torch.einsum('bij,bj->bi', G, dq)
-        final_energy = torch.einsum('bi,bi->', dq, Gdq).item()
+        final_energy = compute_energy(params).item()
 
     arc_length = compute_variational_arc_length(final_path)
 
@@ -241,16 +224,13 @@ def batch_coarse_search(
     N=50,
     max_iter=1000,
     lr=0.01,
-    barrier_mu=1e-3,
-    barrier_anneal=0.5,
-    barrier_anneal_every=150,
     tol=1e-7,
     verbose=True,
 ):
     """用 Adam 并行优化 K 条从 start 到 x=x_target 的离散路径。
 
     所有路径共享同一次 NN forward pass 以提高效率。
-    使用对数障碍函数约束路径点在 [0,1]² 内，并逐步退火。
+    使用 sigmoid 重参数化约束路径点在 (eps, 1-eps) 内。
 
     参数:
         start: (x0, y0) 起点坐标
@@ -260,9 +240,6 @@ def batch_coarse_search(
         N: 每条路径的离散段数
         max_iter: Adam 最大迭代次数
         lr: Adam 学习率
-        barrier_mu: 对数障碍初始权重
-        barrier_anneal: 障碍退火因子
-        barrier_anneal_every: 障碍退火间隔
         tol: 收敛容差（所有路径能量相对变化）
         verbose: 是否打印优化过程
 
@@ -278,44 +255,42 @@ def batch_coarse_search(
     eps = 1e-4
     n_free = 2 * (N - 1) + 1
 
-    # 初始化 (K, n_free) 参数矩阵
+    def to_raw(x):
+        """inverse sigmoid: 将 (eps, 1-eps) 映射到无约束空间 ℝ"""
+        x_c = np.clip(x, eps * 2, 1 - eps * 2)
+        return np.log((x_c - eps) / (1 - eps - x_c))
+
+    # 初始化 (K, n_free) 参数矩阵（无约束空间）
     all_params = torch.zeros(K, n_free, dtype=get_dtype(), device=get_device())
     for k, y_c in enumerate(y_candidates):
         for i in range(1, N):
             t = i / N
-            all_params[k, 2 * (i - 1)] = x0 * (1 - t) + x_target * t
-            all_params[k, 2 * (i - 1) + 1] = y0 * (1 - t) + y_c * t
-        all_params[k, -1] = y_c  # 终点 y
+            all_params[k, 2 * (i - 1)] = to_raw(x0 * (1 - t) + x_target * t)
+            all_params[k, 2 * (i - 1) + 1] = to_raw(y0 * (1 - t) + y_c * t)
+        all_params[k, -1] = to_raw(y_c)  # 终点 y
     all_params = all_params.detach().requires_grad_(True)
 
     q0 = torch.tensor([x0, y0], dtype=get_dtype(), device=get_device())  # 固定起点
 
     def build_all_paths(params):
-        """从 (K, n_free) 构建 (K, N+1, 2) 路径"""
-        inner = params[:, :-1].reshape(K, N - 1, 2)           # (K, N-1, 2)
-        y_end = params[:, -1:]                                  # (K, 1)
+        """从 (K, n_free) 经 sigmoid 映射构建 (K, N+1, 2) 路径"""
+        coords = torch.sigmoid(params) * (1 - 2 * eps) + eps  # (K, n_free)
+        inner = coords[:, :-1].reshape(K, N - 1, 2)           # (K, N-1, 2)
+        y_end = coords[:, -1:]                                  # (K, 1)
         x_end = torch.full_like(y_end, x_target)
         endpoint = torch.cat([x_end, y_end], dim=1).unsqueeze(1)  # (K, 1, 2)
         start_pt = q0.unsqueeze(0).unsqueeze(0).expand(K, 1, 2)   # (K, 1, 2)
         return torch.cat([start_pt, inner, endpoint], dim=1)       # (K, N+1, 2)
 
     optimizer = torch.optim.Adam([all_params], lr=lr)
-    mu = barrier_mu
 
     t_start = time.time()
     prev_energies = None
     iteration = 0
 
     for iteration in range(max_iter):
-        if iteration > 0 and iteration % barrier_anneal_every == 0:
-            mu *= barrier_anneal
-            if verbose:
-                print(f"  barrier mu annealed to {mu:.2e}")
-
         optimizer.zero_grad()
         paths = build_all_paths(all_params)                    # (K, N+1, 2)
-        # clamp 自由点，防止 log barrier 产生 NaN
-        paths = torch.cat([paths[:, :1], paths[:, 1:].clamp(eps, 1 - eps)], dim=1)
         dqs = paths[:, 1:] - paths[:, :-1]                    # (K, N, 2)
         mids = (0.5 * (paths[:, :-1] + paths[:, 1:])).clamp(eps, 1 - eps)  # (K, N, 2)
 
@@ -327,49 +302,40 @@ def batch_coarse_search(
         Gdq = torch.einsum('kbij,kbj->kbi', G, dqs)          # (K, N, 2)
         E = torch.einsum('kbi,kbi->k', dqs, Gdq)             # (K,)
 
-        # 对数障碍
-        free_coords = paths[:, 1:].reshape(K, -1)             # (K, 2*N)
-        barrier = -(torch.log(free_coords - eps) + torch.log(1 - eps - free_coords)).sum(dim=1)
-        E_total = E + mu * barrier                             # (K,)
-
-        loss = E_total.sum()
+        loss = E.sum()
         loss.backward()
         optimizer.step()
-
-        # clamp 参数
-        with torch.no_grad():
-            all_params.clamp_(eps, 1 - eps)
 
         if verbose and (iteration % 200 == 0 or iteration == max_iter - 1):
             print(f"  iter {iteration:4d}  energies: min={E.min().item():.6f} max={E.max().item():.6f}")
 
         # 收敛检查
         if iteration > 20 and prev_energies is not None:
-            rel_change = (prev_energies - E_total).abs() / (E_total.abs() + 1e-12)
+            rel_change = (prev_energies - E).abs() / (E.abs() + 1e-12)
             if rel_change.max().item() < tol:
                 if verbose:
                     print(f"  all paths converged at iter {iteration}")
                 break
-        prev_energies = E_total.detach().clone()
+        prev_energies = E.detach().clone()
 
     elapsed = time.time() - t_start
 
     # 提取结果
     candidates = []
     with torch.no_grad():
-        paths_final = build_all_paths(all_params).detach().cpu().numpy()  # (K, N+1, 2)
-        # 计算纯能量（不含 barrier）
-        paths_t = build_all_paths(all_params)
-        dqs_t = paths_t[:, 1:] - paths_t[:, :-1]
-        mids_t = (0.5 * (paths_t[:, :-1] + paths_t[:, 1:])).clamp(eps, 1 - eps)
+        paths_final = build_all_paths(all_params)              # (K, N+1, 2)
+        # 计算能量
+        dqs_t = paths_final[:, 1:] - paths_final[:, :-1]
+        mids_t = (0.5 * (paths_final[:, :-1] + paths_final[:, 1:])).clamp(eps, 1 - eps)
         mids_flat_t = mids_t.reshape(K * N, 2)
         G_flat_t = metric_tensor_xy_batch(mids_flat_t)
         G_t = G_flat_t.reshape(K, N, 2, 2)
         Gdq_t = torch.einsum('kbij,kbj->kbi', G_t, dqs_t)
         E_pure = torch.einsum('kbi,kbi->k', dqs_t, Gdq_t).cpu().numpy()
+        paths_final_np = paths_final.cpu().numpy()
 
     for k in range(K):
-        p = paths_final[k]
+        p = paths_final_np[k]
         arc_len = compute_variational_arc_length(p)
         candidates.append({
             'y_init': float(y_candidates[k]),
@@ -396,7 +362,6 @@ def batch_coarse_search(
 def multi_start_variational_geodesic_to_line(
     start, x_target=0.2, y_candidates=None, K=12,
     N=50, lr=1.0, max_iter=300, tol=1e-8, grad_tol=1e-5,
-    barrier_mu=1e-3, barrier_anneal=0.5, barrier_anneal_every=50,
     refine_top_k=3, refine_N=100, refine_max_iter=300,
     verbose=True,
 ):
@@ -438,8 +403,6 @@ def multi_start_variational_geodesic_to_line(
     candidates = batch_coarse_search(
         start=start, x_target=x_target, y_candidates=y_candidates, K=K,
         N=N, lr=0.01,
-        barrier_mu=barrier_mu, barrier_anneal=barrier_anneal,
-        barrier_anneal_every=barrier_anneal_every,
         verbose=verbose,
     )
     t_coarse = time.time() - t_coarse_start
@@ -479,9 +442,7 @@ def multi_start_variational_geodesic_to_line(
         path, energy, arc_len, info = variational_geodesic_to_line(
             start=start, x_target=x_target, init_path=resampled,
             N=refine_N, lr=lr, max_iter=refine_max_iter,
-            barrier_mu=1e-4,
-            barrier_anneal=barrier_anneal,
-            barrier_anneal_every=barrier_anneal_every, verbose=verbose,
+            verbose=verbose,
         )
         refined.append({
             'y_init': c['y_init'],
@@ -561,9 +522,6 @@ def plot_variational_geodesic_to_line(
     max_iter=300,
     tol=1e-8,
     grad_tol=1e-5,
-    barrier_mu=1e-3,
-    barrier_anneal=0.5,
-    barrier_anneal_every=50,
     refine_top_k=3,
     refine_N=200,
     refine_max_iter=500,
@@ -611,9 +569,7 @@ def plot_variational_geodesic_to_line(
                 start=start, x_target=x_target,
                 y_candidates=y_candidates, K=K,
                 N=N, lr=lr, max_iter=max_iter, tol=tol,
-                grad_tol=grad_tol, barrier_mu=barrier_mu,
-                barrier_anneal=barrier_anneal,
-                barrier_anneal_every=barrier_anneal_every,
+                grad_tol=grad_tol,
                 refine_top_k=refine_top_k, refine_N=refine_N,
                 refine_max_iter=refine_max_iter, verbose=True,
             )
@@ -626,9 +582,7 @@ def plot_variational_geodesic_to_line(
         path, energy, arc_length, info = variational_geodesic_to_line(
             start=start, x_target=x_target, y_init=y_init,
             N=N, lr=lr, max_iter=max_iter, tol=tol,
-            grad_tol=grad_tol, barrier_mu=barrier_mu,
-            barrier_anneal=barrier_anneal,
-            barrier_anneal_every=barrier_anneal_every, verbose=True,
+            grad_tol=grad_tol, verbose=True,
         )
         candidate_paths = []
 
