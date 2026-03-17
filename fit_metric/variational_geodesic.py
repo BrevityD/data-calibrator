@@ -6,6 +6,7 @@
 """
 
 import os
+import sys
 import json
 import time
 import numpy as np
@@ -729,18 +730,49 @@ def plot_variational_geodesic_to_line(
 
 
 # =========================================================
-# 5. 主程序
+# 5. stdout/stderr 同时写入日志文件
+# =========================================================
+class TeeStream:
+    """将写入同时转发到原始流和文件。"""
+
+    def __init__(self, original, log_file):
+        self.original = original
+        self.log_file = log_file
+
+    def write(self, data):
+        self.original.write(data)
+        self.log_file.write(data)
+
+    def flush(self):
+        self.original.flush()
+        self.log_file.flush()
+
+
+# =========================================================
+# 6. 主程序
 # =========================================================
 if __name__ == '__main__':
     init(device_str="cuda:4")
 
-    start = (0.9, 0.9)
-    plot_variational_geodesic_to_line(
-        start=start,
-        x_target=0.2,
-        N=100,
-        max_iter=300,
-        y_candidates=np.linspace(0.05, 0.95, 12),
-        save_path='result/variational_geodesic/variational_geodesic.png',
-    )
+    out_dir = 'result/variational_geodesic'
+    os.makedirs(out_dir, exist_ok=True)
+    log_file = open(os.path.join(out_dir, 'variational_geodesic.log'), 'w', encoding='utf-8')
+    sys.stdout = TeeStream(sys.__stdout__, log_file)
+    sys.stderr = TeeStream(sys.__stderr__, log_file)
+
+    try:
+        start = (0.9, 1.0)
+        plot_variational_geodesic_to_line(
+            start=start,
+            x_target=0.1,
+            N=100,
+            max_iter=300,
+            y_candidates=np.linspace(0.05, 0.95, 12),
+            save_path=os.path.join(out_dir, 'variational_geodesic.png'),
+        )
+    finally:
+        sys.stdout = sys.__stdout__
+        sys.stderr = sys.__stderr__
+        log_file.close()
+        print(f"Log saved to: {os.path.join(out_dir, 'variational_geodesic.log')}")
 
