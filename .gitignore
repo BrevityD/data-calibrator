@@ -220,3 +220,7 @@ hf_cache/
 datasets/**
 !datasets/**/*.py
 !datasets/**/*.md
+
+# fit_metric results
+fit_metric/result/**
+!fit_metric/result/.gitkeep

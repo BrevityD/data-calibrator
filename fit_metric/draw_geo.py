@@ -988,5 +988,5 @@ if __name__ == "__main__":
         heatmap_n=120,
         ellipse_grid=9,
         ellipse_scale=0.05,
-        save_path='geodesic_09_to_02.png'
+        save_path='result/draw_geo/geodesic_09_to_02.png'
     )

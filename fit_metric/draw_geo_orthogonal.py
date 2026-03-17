@@ -517,8 +517,8 @@ all_results = plot_geodesic_fan_orthogonal_to_vertical_line(
     heatmap_n=120,
     ellipse_grid=9,
     ellipse_scale=0.05,
-    save_path='orthogonal_geodesics_right.png',
-    log_path='orthogonal_geodesics_right_log.json',
+    save_path='result/draw_geo_orthogonal/orthogonal_geodesics_right.png',
+    log_path='result/draw_geo_orthogonal/orthogonal_geodesics_right_log.json',
 )
 
 # --- 示例：双向发射 ---

@@ -693,6 +693,6 @@ if __name__ == '__main__':
         N=100,
         max_iter=300,
         y_candidates=np.linspace(0.05, 0.95, 12),
-        save_path='variational_geodesic.png',
+        save_path='result/variational_geodesic/variational_geodesic.png',
     )
 
