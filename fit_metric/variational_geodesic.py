@@ -626,6 +626,9 @@ def plot_variational_geodesic_to_line(
     # 最优测地线路径（红色）
     ax.plot(path[:, 0], path[:, 1], color='red', linewidth=2.5,
             label='best geodesic')
+    # 标注离散节点（内部点），检查点分布是否均匀
+    ax.scatter(path[1:-1, 0], path[1:-1, 1], color='red', s=8,
+               zorder=5, alpha=0.7, label=f'nodes ({len(path)-2})')
 
     # 起点 / 终点
     ax.scatter([start[0]], [start[1]], color='cyan', s=80,
