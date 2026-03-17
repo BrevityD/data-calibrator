@@ -222,7 +222,7 @@ def batch_coarse_search(
     y_candidates=None,
     K=12,
     N=50,
-    max_iter=1000,
+    max_iter=2000,
     lr=0.01,
     tol=1e-7,
     verbose=True,
@@ -230,7 +230,8 @@ def batch_coarse_search(
     """用 Adam 并行优化 K 条从 start 到 x=x_target 的离散路径。
 
     所有路径共享同一次 NN forward pass 以提高效率。
-    使用 sigmoid 重参数化约束路径点在 (eps, 1-eps) 内。
+    使用直接坐标 + clamp 约束路径点在 (eps, 1-eps) 内，
+    避免 sigmoid 在边界附近梯度消失。
 
     参数:
         start: (x0, y0) 起点坐标
@@ -255,26 +256,21 @@ def batch_coarse_search(
     eps = 1e-4
     n_free = 2 * (N - 1) + 1
 
-    def to_raw(x):
-        """inverse sigmoid: 将 (eps, 1-eps) 映射到无约束空间 ℝ"""
-        x_c = np.clip(x, eps * 2, 1 - eps * 2)
-        return np.log((x_c - eps) / (1 - eps - x_c))
-
-    # 初始化 (K, n_free) 参数矩阵（无约束空间）
+    # 初始化 (K, n_free) 参数矩阵（直接坐标空间，Adam + clamp）
     all_params = torch.zeros(K, n_free, dtype=get_dtype(), device=get_device())
     for k, y_c in enumerate(y_candidates):
         for i in range(1, N):
             t = i / N
-            all_params[k, 2 * (i - 1)] = to_raw(x0 * (1 - t) + x_target * t)
-            all_params[k, 2 * (i - 1) + 1] = to_raw(y0 * (1 - t) + y_c * t)
-        all_params[k, -1] = to_raw(y_c)  # 终点 y
+            all_params[k, 2 * (i - 1)] = x0 * (1 - t) + x_target * t
+            all_params[k, 2 * (i - 1) + 1] = y0 * (1 - t) + y_c * t
+        all_params[k, -1] = y_c  # 终点 y
     all_params = all_params.detach().requires_grad_(True)
 
     q0 = torch.tensor([x0, y0], dtype=get_dtype(), device=get_device())  # 固定起点
 
     def build_all_paths(params):
-        """从 (K, n_free) 经 sigmoid 映射构建 (K, N+1, 2) 路径"""
-        coords = torch.sigmoid(params) * (1 - 2 * eps) + eps  # (K, n_free)
+        """从 (K, n_free) 经 clamp 构建 (K, N+1, 2) 路径"""
+        coords = params.clamp(eps, 1 - eps)  # (K, n_free)
         inner = coords[:, :-1].reshape(K, N - 1, 2)           # (K, N-1, 2)
         y_end = coords[:, -1:]                                  # (K, 1)
         x_end = torch.full_like(y_end, x_target)
@@ -305,6 +301,8 @@ def batch_coarse_search(
         loss = E.sum()
         loss.backward()
         optimizer.step()
+        with torch.no_grad():
+            all_params.clamp_(eps, 1 - eps)
 
         if verbose and (iteration % 200 == 0 or iteration == max_iter - 1):
             print(f"  iter {iteration:4d}  energies: min={E.min().item():.6f} max={E.max().item():.6f}")
@@ -348,7 +346,7 @@ def batch_coarse_search(
             'phase': 'coarse',
         })
 
-    candidates.sort(key=lambda c: c['arc_length'] if c['arc_length'] > 0 and not np.isnan(c['arc_length']) else float('inf'))
+    candidates.sort(key=lambda c: c['energy'] if not np.isnan(c['energy']) else float('inf'))
 
     if verbose:
         print(f"  batch coarse search: {elapsed:.3f}s, {iteration+1} iters")
@@ -455,7 +453,7 @@ def multi_start_variational_geodesic_to_line(
             'phase': 'refined',
         })
 
-    refined.sort(key=lambda c: c['arc_length'] if c['arc_length'] > 0 and not np.isnan(c['arc_length']) else float('inf'))
+    refined.sort(key=lambda c: c['energy'] if not np.isnan(c['energy']) else float('inf'))
     best = refined[0]
     t_refine = time.time() - t_refine_start
     t_total = t_coarse + t_refine
