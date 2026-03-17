@@ -149,15 +149,12 @@ def variational_geodesic_to_line(
             optimizer.zero_grad()
             E = compute_energy(params)
             E.backward()
+            torch.nn.utils.clip_grad_norm_([params], max_norm=1e3)
             return E
 
         E_val = optimizer.step(closure)
         e = E_val.item()
         energy_history.append(e)
-
-        # clamp 参数到合法范围（安全网）
-        with torch.no_grad():
-            params.clamp_(eps, 1 - eps)
 
         grad_norm = params.grad.norm().item() if params.grad is not None else float('inf')
 
@@ -482,7 +479,7 @@ def multi_start_variational_geodesic_to_line(
         path, energy, arc_len, info = variational_geodesic_to_line(
             start=start, x_target=x_target, init_path=resampled,
             N=refine_N, lr=lr, max_iter=refine_max_iter,
-            barrier_mu=0,
+            barrier_mu=1e-4,
             barrier_anneal=barrier_anneal,
             barrier_anneal_every=barrier_anneal_every, verbose=verbose,
         )
