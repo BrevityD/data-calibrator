@@ -56,7 +56,7 @@ class GeoGuideConfig:
     adam_beta2: float = 1e-12
     lr_scheduler_type: str = "constant"
     max_steps: int = 401
-    inner_num_train_epochs: int = 100  # 每轮 SFTTrainer 内部 epoch 数（受 max_steps 截断）
+    num_train_epochs: int = 100        # SFTTrainer 内部 epoch 数（受 max_steps 截断）
     eval_steps: int = 1
     eval_on_start: bool = True
     save_steps: int = 19
@@ -406,7 +406,7 @@ def _run(cfg: GeoGuideConfig):
                 learning_rate=cfg.learning_rate,
                 per_device_train_batch_size=cfg.per_device_train_batch_size,
                 gradient_accumulation_steps=cfg.gradient_accumulation_steps,
-                num_train_epochs=cfg.inner_num_train_epochs,
+                num_train_epochs=cfg.num_train_epochs,
                 max_steps=cfg.max_steps,
                 logging_steps=1,
                 output_dir=ckpt_dir,
@@ -504,7 +504,7 @@ def parse_args() -> GeoGuideConfig:
     p.add_argument("--adam_beta2", type=float, default=defaults.adam_beta2)
     p.add_argument("--lr_scheduler_type", type=str, default=defaults.lr_scheduler_type)
     p.add_argument("--max_steps", type=int, default=defaults.max_steps)
-    p.add_argument("--inner_num_train_epochs", type=int, default=defaults.inner_num_train_epochs)
+    p.add_argument("--num_train_epochs", type=int, default=defaults.num_train_epochs)
     p.add_argument("--eval_steps", type=int, default=defaults.eval_steps)
     p.add_argument("--eval_on_start", action=argparse.BooleanOptionalAction, default=defaults.eval_on_start)
     p.add_argument("--save_steps", type=int, default=defaults.save_steps)
