@@ -169,7 +169,12 @@ def tangent_to_ratio(tangent, xy):
         print("[WARN] Jacobian singular, falling back to pseudo-inverse")
         J_inv = np.linalg.pinv(J)
 
-    delta_ratio = J_inv @ tangent
+    delta_ratio = J_inv @ tangent  # a = J^{-1} γ̇(0), Proposal §8.1
+    # Proposal §8.2: p_math = a1/(a1+a2) when both >= 0
+    # Proposal §8.5: negative coefficient → truncate & renormalize
+    if delta_ratio[0] < 0 or delta_ratio[1] < 0:
+        print(f"  [WARN] negative opt-basis coefficient: a=({delta_ratio[0]:.6f}, {delta_ratio[1]:.6f}), "
+              f"truncating to abs (Proposal §8.5)")
     abs_delta = np.abs(delta_ratio)
     s = abs_delta.sum()
     if s < 1e-12:
