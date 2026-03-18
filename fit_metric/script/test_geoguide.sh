@@ -10,7 +10,7 @@ python -m fit_metric.sft_via_geoguide \
     --max_epochs 2 \
     --max_steps 10 \
     --save_steps 10 \
-    --eval_steps 10 \
+    --eval_steps 999 \
     --no-eval_on_start \
     --train_device cuda:4 \
     --geo_device cuda:5 \
