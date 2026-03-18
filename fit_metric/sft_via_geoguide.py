@@ -221,29 +221,7 @@ def build_mixed_dataset(math_train, code_train, math_ratio: float, total_size: i
 
 
 # =========================================================
-# 4. 评估
-# =========================================================
-def evaluate_domain_losses(trainer, math_test, code_test):
-    """分别在 math_test / code_test 上 evaluate，返回两个 eval_loss。
-
-    需要先用 trainer 内部的 _prepare_dataset 对数据集做 tokenization，
-    否则 collator 会因缺少 input_ids 报错。
-    """
-    prepared_math = trainer._prepare_dataset(
-        math_test, trainer.processing_class, trainer.args,
-        packing=False, formatting_func=None, dataset_name="eval_math",
-    )
-    prepared_code = trainer._prepare_dataset(
-        code_test, trainer.processing_class, trainer.args,
-        packing=False, formatting_func=None, dataset_name="eval_code",
-    )
-    math_metrics = trainer.evaluate(eval_dataset=prepared_math, metric_key_prefix="eval_math")
-    code_metrics = trainer.evaluate(eval_dataset=prepared_code, metric_key_prefix="eval_code")
-    return math_metrics["eval_math_loss"], code_metrics["eval_code_loss"]
-
-
-# =========================================================
-# 5. stdout/stderr tee
+# 4. stdout/stderr tee
 # =========================================================
 class TeeStream:
     def __init__(self, original, log_file):
@@ -260,7 +238,7 @@ class TeeStream:
 
 
 # =========================================================
-# 6. 主循环
+# 5. 主循环
 # =========================================================
 def _parse_cuda_index(device_str: str) -> int:
     """从 'cuda:N' 提取 N，'cpu' 返回 -1。"""
@@ -367,11 +345,12 @@ def _run(cfg: GeoGuideConfig):
             math_train, code_train, 0.5, min(10, cfg.total_train_size),
         )
         ckpt_dir = os.path.join(cfg.output_dir, f"checkpoint_epoch{epoch}")
+        eval_test = {"math": math_test, "code": code_test}
         eval_trainer = SFTTrainer(
             model=model_obj,
             processing_class=tokenizer,
             train_dataset=dummy_train,
-            eval_dataset=math_test,
+            eval_dataset=eval_test,
             args=SFTConfig(
                 do_eval=True,
                 eval_strategy="no",
@@ -387,7 +366,9 @@ def _run(cfg: GeoGuideConfig):
 
         # b. 评估当前模型的 math/code loss
         print("  Evaluating domain losses ...")
-        raw_math_loss, raw_code_loss = evaluate_domain_losses(eval_trainer, math_test, code_test)
+        metrics = eval_trainer.evaluate()
+        raw_math_loss = metrics["eval_math_loss"]
+        raw_code_loss = metrics["eval_code_loss"]
         print(f"  raw losses: math={raw_math_loss:.6f}, code={raw_code_loss:.6f}")
 
         # c. 归一化
@@ -418,7 +399,7 @@ def _run(cfg: GeoGuideConfig):
             model=model_obj,
             processing_class=tokenizer,
             train_dataset=mixed_train,
-            eval_dataset=math_test,
+            eval_dataset=eval_test,
             args=SFTConfig(
                 do_eval=True,
                 eval_strategy="steps",
