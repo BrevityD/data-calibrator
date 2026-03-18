@@ -445,6 +445,26 @@ def _run(cfg: GeoGuideConfig):
             json.dump(full_log, f, indent=2, ensure_ascii=False)
         print(f"  log saved to {log_path}")
 
+        # 写入 epoch 摘要（归一化前后坐标 + ratio）
+        summary_path = os.path.join(cfg.output_dir, "epoch_summary.json")
+        summary_entry = {
+            "epoch": epoch,
+            "raw_loss": {"math": raw_math_loss, "code": raw_code_loss},
+            "normalized": {"math": nx, "code": ny},
+            "current_ratio": {"math": math_ratio, "code": 1.0 - math_ratio},
+            "next_ratio": {"math": new_math_ratio, "code": new_code_ratio},
+        }
+        # 追加到列表
+        if epoch == 0:
+            summary_list = []
+        else:
+            with open(summary_path, "r", encoding="utf-8") as f:
+                summary_list = json.load(f)
+        summary_list.append(summary_entry)
+        with open(summary_path, "w", encoding="utf-8") as f:
+            json.dump(summary_list, f, indent=2, ensure_ascii=False)
+        print(f"  summary saved to {summary_path}")
+
         # j. 释放显存
         del trainer
         torch.cuda.empty_cache()
