@@ -354,23 +354,66 @@ def _run(cfg: GeoGuideConfig):
 
     for epoch in range(cfg.num_epochs):
         print(f"\n{'='*60}")
-        print(f"Epoch {epoch}/{cfg.num_epochs}  |  math_ratio = {math_ratio:.4f}")
+        print(f"Epoch {epoch}/{cfg.num_epochs}")
         print(f"{'='*60}")
 
-        # a. 构建混合数据集
+        # a. 创建临时 trainer 用于评估当前模型
+        #    用一个 dummy 训练集（实际不会训练），只为调用 evaluate()
+        dummy_train, _, _ = build_mixed_dataset(
+            math_train, code_train, 0.5, min(10, cfg.total_train_size),
+        )
+        ckpt_dir = os.path.join(cfg.output_dir, f"checkpoint_epoch{epoch}")
+        eval_trainer = SFTTrainer(
+            model=model_path,
+            train_dataset=dummy_train,
+            eval_dataset=math_test,
+            args=SFTConfig(
+                do_eval=True,
+                eval_strategy="no",
+                max_length=cfg.max_seq_length,
+                per_device_train_batch_size=cfg.per_device_train_batch_size,
+                num_train_epochs=1,
+                output_dir=ckpt_dir,
+                optim=cfg.optim,
+                remove_unused_columns=False,
+                seed=cfg.seed,
+                report_to="none",
+            ),
+        )
+
+        # b. 评估当前模型的 math/code loss
+        print("  Evaluating domain losses ...")
+        raw_math_loss, raw_code_loss = evaluate_domain_losses(eval_trainer, math_test, code_test)
+        print(f"  raw losses: math={raw_math_loss:.6f}, code={raw_code_loss:.6f}")
+
+        # c. 归一化
+        nx, ny = normalize_losses(raw_math_loss, raw_code_loss, norm_params)
+        print(f"  normalized: ({nx:.6f}, {ny:.6f})")
+
+        # d. 测地线方向
+        print("  Computing geodesic tangent ...")
+        tangent, geo_path, geo_energy, geo_arc = compute_geodesic_tangent((nx, ny), cfg)
+        print(f"  tangent = ({tangent[0]:.6f}, {tangent[1]:.6f})")
+
+        # e. 切向量 → 配比
+        math_ratio, code_ratio = tangent_to_ratio(tangent, (nx, ny))
+        print(f"  ratio: math={math_ratio:.4f}, code={code_ratio:.4f}")
+
+        # 释放 eval_trainer
+        del eval_trainer
+        torch.cuda.empty_cache()
+
+        # f. 构建混合数据集
         mixed_train, n_math, n_code = build_mixed_dataset(
             math_train, code_train, math_ratio, cfg.total_train_size,
         )
         print(f"  mixed dataset: {n_math} math + {n_code} code = {len(mixed_train)}")
 
-        # b. checkpoint 目录
-        ckpt_dir = os.path.join(cfg.output_dir, f"checkpoint_epoch{epoch}")
-
-        # c. 创建 SFTTrainer（warm start: model_path 指向上一轮 checkpoint）
+        # g. 创建 SFTTrainer 训练
         trainer = SFTTrainer(
             model=model_path,
             train_dataset=mixed_train,
-            eval_dataset=math_test,  # 默认 eval 用 math_test
+            eval_dataset=math_test,
             args=SFTConfig(
                 do_eval=True,
                 eval_strategy="steps",
@@ -398,27 +441,9 @@ def _run(cfg: GeoGuideConfig):
             ),
         )
 
-        # d. 训练
+        # h. 训练
         print(f"  Training (model_path={model_path}) ...")
         trainer.train()
-
-        # e. 评估
-        print("  Evaluating domain losses ...")
-        raw_math_loss, raw_code_loss = evaluate_domain_losses(trainer, math_test, code_test)
-        print(f"  raw losses: math={raw_math_loss:.6f}, code={raw_code_loss:.6f}")
-
-        # f. 归一化
-        nx, ny = normalize_losses(raw_math_loss, raw_code_loss, norm_params)
-        print(f"  normalized: ({nx:.6f}, {ny:.6f})")
-
-        # g. 测地线方向
-        print("  Computing geodesic tangent ...")
-        tangent, geo_path, geo_energy, geo_arc = compute_geodesic_tangent((nx, ny), cfg)
-        print(f"  tangent = ({tangent[0]:.6f}, {tangent[1]:.6f})")
-
-        # h. 切向量 → 配比
-        new_math_ratio, new_code_ratio = tangent_to_ratio(tangent, (nx, ny))
-        print(f"  new ratio: math={new_math_ratio:.4f}, code={new_code_ratio:.4f}")
 
         # i. 保存 epoch 日志
         epoch_log = {
@@ -433,8 +458,6 @@ def _run(cfg: GeoGuideConfig):
             "tangent": [float(tangent[0]), float(tangent[1])],
             "geodesic_energy": float(geo_energy),
             "geodesic_arc_length": float(geo_arc),
-            "new_math_ratio": new_math_ratio,
-            "new_code_ratio": new_code_ratio,
             "checkpoint_dir": ckpt_dir,
         }
         epoch_logs.append(epoch_log)
@@ -452,10 +475,8 @@ def _run(cfg: GeoGuideConfig):
             "epoch": epoch,
             "raw_loss": {"math": raw_math_loss, "code": raw_code_loss},
             "normalized": {"math": nx, "code": ny},
-            "current_ratio": {"math": math_ratio, "code": 1.0 - math_ratio},
-            "next_ratio": {"math": new_math_ratio, "code": new_code_ratio},
+            "ratio": {"math": math_ratio, "code": code_ratio},
         }
-        # 追加到列表
         if epoch == 0:
             summary_list = []
         else:
@@ -471,8 +492,6 @@ def _run(cfg: GeoGuideConfig):
         torch.cuda.empty_cache()
 
         # k. warm start: 下一轮用本轮 checkpoint
-        # SFTTrainer save_strategy="epoch" 会保存到 ckpt_dir/checkpoint-{step}
-        # 找到最新的 checkpoint 子目录
         ckpt_subdirs = sorted(
             [d for d in os.listdir(ckpt_dir) if d.startswith("checkpoint-")],
             key=lambda x: int(x.split("-")[-1]),
@@ -482,9 +501,6 @@ def _run(cfg: GeoGuideConfig):
         else:
             model_path = ckpt_dir
         print(f"  next model_path = {model_path}")
-
-        # 更新配比
-        math_ratio = new_math_ratio
 
     print(f"\n{'='*60}")
     print("GeoGuide training complete.")
