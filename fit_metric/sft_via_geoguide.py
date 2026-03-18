@@ -47,7 +47,7 @@ class GeoGuideConfig:
     code_test_size: int = 100
 
     # --- 训练超参 ---
-    num_epochs: int = 5
+    max_epochs: int = 5              # 外层循环次数（每次 = 1 个完整 SFT epoch）
     learning_rate: float = 2e-7
     per_device_train_batch_size: int = 4
     gradient_accumulation_steps: int = 4
@@ -55,8 +55,8 @@ class GeoGuideConfig:
     adam_beta1: float = 1e-12
     adam_beta2: float = 1e-12
     lr_scheduler_type: str = "constant"
-    max_steps: int = 401
-    num_train_epochs: int = 100        # SFTTrainer 内部 epoch 数（受 max_steps 截断）
+    max_steps: int = -1              # 全局累计步数上限（-1=不限）
+    target_loss: float = -1.0        # early stop 阈值（-1=不启用），检查 geo_target_domain 的 loss
     eval_steps: int = 1
     eval_on_start: bool = True
     save_steps: int = 19
@@ -330,10 +330,11 @@ def _run(cfg: GeoGuideConfig):
 
     # --- 主循环 ---
     epoch_logs = []
+    global_step = 0
 
-    for epoch in range(cfg.num_epochs):
+    for epoch in range(cfg.max_epochs):
         print(f"\n{'='*60}")
-        print(f"Epoch {epoch}/{cfg.num_epochs}")
+        print(f"Epoch {epoch}/{cfg.max_epochs}")
         print(f"{'='*60}")
 
         # a. 创建临时 trainer 用于评估当前模型
@@ -368,6 +369,14 @@ def _run(cfg: GeoGuideConfig):
         raw_code_loss = metrics["eval_code_loss"]
         print(f"  raw losses: math={raw_math_loss:.6f}, code={raw_code_loss:.6f}")
 
+        # b2. early stopping 检查（训练前 loss）
+        check_loss = raw_math_loss if cfg.geo_target_domain == "math" else raw_code_loss
+        if cfg.target_loss > 0 and check_loss <= cfg.target_loss:
+            print(f"  [STOP] target loss reached: {check_loss:.6f} <= {cfg.target_loss:.6f}")
+            del eval_trainer
+            torch.cuda.empty_cache()
+            break
+
         # c. 归一化
         nx, ny = normalize_losses(raw_math_loss, raw_code_loss, norm_params)
         print(f"  normalized: ({nx:.6f}, {ny:.6f})")
@@ -391,7 +400,7 @@ def _run(cfg: GeoGuideConfig):
         )
         print(f"  mixed dataset: {n_math} math + {n_code} code = {len(mixed_train)}")
 
-        # g. 创建 SFTTrainer 训练
+        # g. 创建 SFTTrainer 训练（内层固定 1 epoch，不做 step 截断）
         trainer = SFTTrainer(
             model=model_obj,
             processing_class=tokenizer,
@@ -406,8 +415,8 @@ def _run(cfg: GeoGuideConfig):
                 learning_rate=cfg.learning_rate,
                 per_device_train_batch_size=cfg.per_device_train_batch_size,
                 gradient_accumulation_steps=cfg.gradient_accumulation_steps,
-                num_train_epochs=cfg.num_train_epochs,
-                max_steps=cfg.max_steps,
+                num_train_epochs=1,
+                max_steps=-1,
                 logging_steps=1,
                 output_dir=ckpt_dir,
                 remove_unused_columns=False,
@@ -428,6 +437,10 @@ def _run(cfg: GeoGuideConfig):
         print(f"  Training epoch {epoch} ...")
         trainer.train()
 
+        # h2. 累计步数
+        epoch_steps = trainer.state.global_step
+        global_step += epoch_steps
+
         # i. warm start: 保留训练后的模型对象供下一轮使用
         model_obj = trainer.model
 
@@ -443,6 +456,8 @@ def _run(cfg: GeoGuideConfig):
             "tangent": [float(tangent[0]), float(tangent[1])],
             "geodesic_energy": float(geo_energy),
             "geodesic_arc_length": float(geo_arc),
+            "epoch_steps": epoch_steps,
+            "global_step": global_step,
             "checkpoint_dir": ckpt_dir,
         }
         epoch_logs.append(epoch_log)
@@ -461,6 +476,8 @@ def _run(cfg: GeoGuideConfig):
             "raw_loss": {"math": raw_math_loss, "code": raw_code_loss},
             "normalized": {"math": nx, "code": ny},
             "ratio": {"math": math_ratio, "code": code_ratio},
+            "epoch_steps": epoch_steps,
+            "global_step": global_step,
         }
         if epoch == 0:
             summary_list = []
@@ -475,6 +492,11 @@ def _run(cfg: GeoGuideConfig):
         # k. 释放 trainer（model_obj 已单独保留）
         del trainer
         torch.cuda.empty_cache()
+
+        # l. 检查全局步数预算
+        if cfg.max_steps > 0 and global_step >= cfg.max_steps:
+            print(f"  [STOP] global step budget: {global_step} >= {cfg.max_steps}")
+            break
 
     print(f"\n{'='*60}")
     print("GeoGuide training complete.")
@@ -495,7 +517,7 @@ def parse_args() -> GeoGuideConfig:
     p.add_argument("--code_test_size", type=int, default=defaults.code_test_size)
 
     # 训练超参
-    p.add_argument("--num_epochs", type=int, default=defaults.num_epochs)
+    p.add_argument("--max_epochs", type=int, default=defaults.max_epochs)
     p.add_argument("--learning_rate", type=float, default=defaults.learning_rate)
     p.add_argument("--per_device_train_batch_size", type=int, default=defaults.per_device_train_batch_size)
     p.add_argument("--gradient_accumulation_steps", type=int, default=defaults.gradient_accumulation_steps)
@@ -504,7 +526,7 @@ def parse_args() -> GeoGuideConfig:
     p.add_argument("--adam_beta2", type=float, default=defaults.adam_beta2)
     p.add_argument("--lr_scheduler_type", type=str, default=defaults.lr_scheduler_type)
     p.add_argument("--max_steps", type=int, default=defaults.max_steps)
-    p.add_argument("--num_train_epochs", type=int, default=defaults.num_train_epochs)
+    p.add_argument("--target_loss", type=float, default=defaults.target_loss)
     p.add_argument("--eval_steps", type=int, default=defaults.eval_steps)
     p.add_argument("--eval_on_start", action=argparse.BooleanOptionalAction, default=defaults.eval_on_start)
     p.add_argument("--save_steps", type=int, default=defaults.save_steps)
