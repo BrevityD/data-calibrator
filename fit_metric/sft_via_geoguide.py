@@ -448,4 +448,15 @@ def _run(cfg: GeoGuideConfig):
 
 
 if __name__ == "__main__":
-    main()
+    cfg = GeoGuideConfig(
+        total_train_size=100,
+        num_epochs=2,
+        max_steps=10,
+        save_steps=10,
+        eval_steps=10,
+        eval_on_start=False,
+        train_device="cuda:0",
+        geo_device="cuda:4",
+        report_to="none",
+    )
+    main(cfg)
