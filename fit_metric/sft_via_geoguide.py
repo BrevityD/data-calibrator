@@ -39,7 +39,8 @@ class GeoGuideConfig:
     base_model_path: str = "~/models/Qwen3-4B"
 
     # --- 数据 ---
-    total_train_size: int = 1000       # math + code 训练集总量
+    dataset_pool_size: int = 1000      # 数据集加载大小（固定，保证 test split 一致）
+    total_train_size: int = 1000       # 每轮混合训练集总量（<= dataset_pool_size）
     math_test_size: int = 100
     code_test_size: int = 100
 
@@ -343,8 +344,8 @@ def _run(cfg: GeoGuideConfig):
 
     # --- 加载数据集 ---
     print("Loading datasets ...")
-    math_train, math_test = get_math_dataset(size=cfg.total_train_size)
-    code_train, code_test = get_code_dataset(size=cfg.total_train_size)
+    math_train, math_test = get_math_dataset(size=cfg.dataset_pool_size)
+    code_train, code_test = get_code_dataset(size=cfg.dataset_pool_size)
 
     # --- 主循环 ---
     model_path = cfg.base_model_path
