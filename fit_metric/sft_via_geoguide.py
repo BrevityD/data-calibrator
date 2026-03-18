@@ -369,7 +369,7 @@ def _run(cfg: GeoGuideConfig):
         ckpt_dir = os.path.join(cfg.output_dir, f"checkpoint_epoch{epoch}")
         eval_trainer = SFTTrainer(
             model=model_obj,
-            tokenizer=tokenizer,
+            processing_class=tokenizer,
             train_dataset=dummy_train,
             eval_dataset=math_test,
             args=SFTConfig(
@@ -416,7 +416,7 @@ def _run(cfg: GeoGuideConfig):
         # g. 创建 SFTTrainer 训练
         trainer = SFTTrainer(
             model=model_obj,
-            tokenizer=tokenizer,
+            processing_class=tokenizer,
             train_dataset=mixed_train,
             eval_dataset=math_test,
             args=SFTConfig(
