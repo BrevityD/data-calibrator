@@ -223,9 +223,21 @@ def build_mixed_dataset(math_train, code_train, math_ratio: float, total_size: i
 # 4. 评估
 # =========================================================
 def evaluate_domain_losses(trainer, math_test, code_test):
-    """分别在 math_test / code_test 上 evaluate，返回两个 eval_loss。"""
-    math_metrics = trainer.evaluate(eval_dataset=math_test, metric_key_prefix="eval_math")
-    code_metrics = trainer.evaluate(eval_dataset=code_test, metric_key_prefix="eval_code")
+    """分别在 math_test / code_test 上 evaluate，返回两个 eval_loss。
+
+    需要先用 trainer 内部的 _prepare_dataset 对数据集做 tokenization，
+    否则 collator 会因缺少 input_ids 报错。
+    """
+    prepared_math = trainer._prepare_dataset(
+        math_test, trainer.processing_class, trainer.args,
+        packing=False, formatting_func=None, dataset_name="eval_math",
+    )
+    prepared_code = trainer._prepare_dataset(
+        code_test, trainer.processing_class, trainer.args,
+        packing=False, formatting_func=None, dataset_name="eval_code",
+    )
+    math_metrics = trainer.evaluate(eval_dataset=prepared_math, metric_key_prefix="eval_math")
+    code_metrics = trainer.evaluate(eval_dataset=prepared_code, metric_key_prefix="eval_code")
     return math_metrics["eval_math_loss"], code_metrics["eval_code_loss"]
 
 
