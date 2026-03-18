@@ -44,12 +44,19 @@ class GeoGuideConfig:
 
     # --- 训练超参 ---
     num_epochs: int = 5
-    learning_rate: float = 1e-5
-    per_device_train_batch_size: int = 16
-    gradient_accumulation_steps: int = 1
+    learning_rate: float = 2e-7
+    per_device_train_batch_size: int = 4
+    gradient_accumulation_steps: int = 4
     max_seq_length: int = 16384
-    optim: str = "sgd"
-    inner_num_train_epochs: int = 1    # 每轮 SFTTrainer 内部 epoch 数
+    optim: str = "adamw_torch"
+    adam_beta1: float = 1e-12
+    adam_beta2: float = 1e-12
+    lr_scheduler_type: str = "constant"
+    max_steps: int = -1                # -1 表示由 num_train_epochs 控制
+    inner_num_train_epochs: int = 100  # 每轮 SFTTrainer 内部 epoch 数（受 max_steps 截断）
+    eval_steps: int = 1
+    eval_on_start: bool = True
+    save_steps: int = 500
     train_device: str = "cuda:0"       # SFT 训练设备
 
     # --- 测地线 ---
@@ -343,17 +350,24 @@ def _run(cfg: GeoGuideConfig):
             eval_dataset=math_test,  # 默认 eval 用 math_test
             args=SFTConfig(
                 do_eval=True,
-                eval_strategy="epoch",
+                eval_strategy="steps",
+                eval_steps=cfg.eval_steps,
+                eval_on_start=cfg.eval_on_start,
                 max_length=cfg.max_seq_length,
                 learning_rate=cfg.learning_rate,
                 per_device_train_batch_size=cfg.per_device_train_batch_size,
                 gradient_accumulation_steps=cfg.gradient_accumulation_steps,
                 num_train_epochs=cfg.inner_num_train_epochs,
+                max_steps=cfg.max_steps,
                 logging_steps=1,
                 output_dir=ckpt_dir,
                 optim=cfg.optim,
+                adam_beta1=cfg.adam_beta1,
+                adam_beta2=cfg.adam_beta2,
+                lr_scheduler_type=cfg.lr_scheduler_type,
                 seed=cfg.seed,
-                save_strategy="epoch",
+                save_strategy="steps",
+                save_steps=cfg.save_steps,
                 save_only_model=True,
                 run_name=f"geoguide-epoch{epoch}",
                 report_to=cfg.report_to,
