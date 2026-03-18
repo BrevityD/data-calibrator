@@ -8,6 +8,7 @@ import os
 import sys
 import json
 import logging
+import argparse
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
@@ -484,17 +485,65 @@ def _run(cfg: GeoGuideConfig):
     print(f"{'='*60}")
 
 
+def parse_args() -> GeoGuideConfig:
+    defaults = GeoGuideConfig()
+    p = argparse.ArgumentParser(description="测地线指导的 SFT 数据配比迭代训练")
+
+    # 模型
+    p.add_argument("--base_model_path", type=str, default=defaults.base_model_path)
+
+    # 数据
+    p.add_argument("--dataset_pool_size", type=int, default=defaults.dataset_pool_size)
+    p.add_argument("--total_train_size", type=int, default=defaults.total_train_size)
+    p.add_argument("--math_test_size", type=int, default=defaults.math_test_size)
+    p.add_argument("--code_test_size", type=int, default=defaults.code_test_size)
+
+    # 训练超参
+    p.add_argument("--num_epochs", type=int, default=defaults.num_epochs)
+    p.add_argument("--learning_rate", type=float, default=defaults.learning_rate)
+    p.add_argument("--per_device_train_batch_size", type=int, default=defaults.per_device_train_batch_size)
+    p.add_argument("--gradient_accumulation_steps", type=int, default=defaults.gradient_accumulation_steps)
+    p.add_argument("--max_seq_length", type=int, default=defaults.max_seq_length)
+    p.add_argument("--adam_beta1", type=float, default=defaults.adam_beta1)
+    p.add_argument("--adam_beta2", type=float, default=defaults.adam_beta2)
+    p.add_argument("--lr_scheduler_type", type=str, default=defaults.lr_scheduler_type)
+    p.add_argument("--max_steps", type=int, default=defaults.max_steps)
+    p.add_argument("--inner_num_train_epochs", type=int, default=defaults.inner_num_train_epochs)
+    p.add_argument("--eval_steps", type=int, default=defaults.eval_steps)
+    p.add_argument("--eval_on_start", action=argparse.BooleanOptionalAction, default=defaults.eval_on_start)
+    p.add_argument("--save_steps", type=int, default=defaults.save_steps)
+    p.add_argument("--train_device", type=str, default=defaults.train_device)
+
+    # 测地线
+    p.add_argument("--geo_device", type=str, default=defaults.geo_device)
+    p.add_argument("--geo_target_domain", type=str, default=defaults.geo_target_domain, choices=["math", "code"])
+    p.add_argument("--geo_target_value", type=float, default=defaults.geo_target_value)
+    p.add_argument("--geo_K", type=int, default=defaults.geo_K)
+    p.add_argument("--geo_N", type=int, default=defaults.geo_N)
+    p.add_argument("--geo_refine_top_k", type=int, default=defaults.geo_refine_top_k)
+    p.add_argument("--geo_refine_N", type=int, default=defaults.geo_refine_N)
+    p.add_argument("--math_model_path", type=str, default=defaults.math_model_path)
+    p.add_argument("--code_model_path", type=str, default=defaults.code_model_path)
+
+    # 归一化数据源
+    p.add_argument("--m2c_json", type=str, default=defaults.m2c_json)
+    p.add_argument("--c2m_json", type=str, default=defaults.c2m_json)
+
+    # 初始配比
+    p.add_argument("--init_math_ratio", type=float, default=defaults.init_math_ratio)
+
+    # 输出
+    p.add_argument("--output_dir", type=str, default=defaults.output_dir)
+    p.add_argument("--seed", type=int, default=defaults.seed)
+
+    # wandb
+    p.add_argument("--wandb_project", type=str, default=defaults.wandb_project)
+    p.add_argument("--report_to", type=str, default=defaults.report_to)
+
+    args = p.parse_args()
+    return GeoGuideConfig(**vars(args))
+
+
 if __name__ == "__main__":
-    cfg = GeoGuideConfig(
-        base_model_path="/public/home/jza/share_model/Qwen/Qwen3-1.7B",
-        total_train_size=100,
-        num_epochs=2,
-        max_steps=10,
-        save_steps=10,
-        eval_steps=10,
-        eval_on_start=False,
-        train_device="cuda:4",
-        geo_device="cuda:5",
-        report_to="none",
-    )
+    cfg = parse_args()
     main(cfg)
