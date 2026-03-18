@@ -7,6 +7,7 @@
 import os
 import sys
 import json
+import logging
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
@@ -291,9 +292,18 @@ def main(cfg: GeoGuideConfig | None = None):
     sys.stdout = TeeStream(sys.__stdout__, log_file)
     sys.stderr = TeeStream(sys.__stderr__, log_file)
 
+    # 把 transformers/trl 等库的 logging 也写入日志文件
+    file_handler = logging.FileHandler(
+        os.path.join(cfg.output_dir, "sft_via_geoguide.log"), mode="a", encoding="utf-8",
+    )
+    file_handler.setLevel(logging.DEBUG)
+    logging.root.addHandler(file_handler)
+
     try:
         _run(cfg)
     finally:
+        logging.root.removeHandler(file_handler)
+        file_handler.close()
         sys.stdout = sys.__stdout__
         sys.stderr = sys.__stderr__
         log_file.close()
@@ -449,14 +459,15 @@ def _run(cfg: GeoGuideConfig):
 
 if __name__ == "__main__":
     cfg = GeoGuideConfig(
+        base_model_path="/public/home/jza/share_model/Qwen/Qwen3-1.7B",
         total_train_size=100,
         num_epochs=2,
         max_steps=10,
         save_steps=10,
         eval_steps=10,
         eval_on_start=False,
-        train_device="cuda:0",
-        geo_device="cuda:4",
+        train_device="cuda:4",
+        geo_device="cuda:5",
         report_to="none",
     )
     main(cfg)
