@@ -14,6 +14,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from datasets import concatenate_datasets
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 # 项目根目录
 _SCRIPT_DIR = Path(__file__).resolve().parent
@@ -346,8 +347,12 @@ def _run(cfg: GeoGuideConfig):
     math_train, math_test = get_math_dataset(size=cfg.dataset_pool_size)
     code_train, code_test = get_code_dataset(size=cfg.dataset_pool_size)
 
+    # --- 加载模型和 tokenizer（只从磁盘加载一次） ---
+    print(f"Loading model from {cfg.base_model_path} ...")
+    model_obj = AutoModelForCausalLM.from_pretrained(cfg.base_model_path)
+    tokenizer = AutoTokenizer.from_pretrained(cfg.base_model_path)
+
     # --- 主循环 ---
-    model_path = cfg.base_model_path
     math_ratio = cfg.init_math_ratio
     epoch_logs = []
 
@@ -363,7 +368,8 @@ def _run(cfg: GeoGuideConfig):
         )
         ckpt_dir = os.path.join(cfg.output_dir, f"checkpoint_epoch{epoch}")
         eval_trainer = SFTTrainer(
-            model=model_path,
+            model=model_obj,
+            tokenizer=tokenizer,
             train_dataset=dummy_train,
             eval_dataset=math_test,
             args=SFTConfig(
@@ -397,7 +403,7 @@ def _run(cfg: GeoGuideConfig):
         math_ratio, code_ratio = tangent_to_ratio(tangent, (nx, ny))
         print(f"  ratio: math={math_ratio:.4f}, code={code_ratio:.4f}")
 
-        # 释放 eval_trainer
+        # 释放 eval_trainer（不释放 model_obj，它被共享）
         del eval_trainer
         torch.cuda.empty_cache()
 
@@ -409,7 +415,8 @@ def _run(cfg: GeoGuideConfig):
 
         # g. 创建 SFTTrainer 训练
         trainer = SFTTrainer(
-            model=model_path,
+            model=model_obj,
+            tokenizer=tokenizer,
             train_dataset=mixed_train,
             eval_dataset=math_test,
             args=SFTConfig(
@@ -440,13 +447,15 @@ def _run(cfg: GeoGuideConfig):
         )
 
         # h. 训练
-        print(f"  Training (model_path={model_path}) ...")
+        print(f"  Training epoch {epoch} ...")
         trainer.train()
 
-        # i. 保存 epoch 日志
+        # i. warm start: 保留训练后的模型对象供下一轮使用
+        model_obj = trainer.model
+
+        # j. 保存 epoch 日志
         epoch_log = {
             "epoch": epoch,
-            "model_path": model_path,
             "math_ratio": math_ratio,
             "n_math": n_math,
             "n_code": n_code,
@@ -485,20 +494,9 @@ def _run(cfg: GeoGuideConfig):
             json.dump(summary_list, f, indent=2, ensure_ascii=False)
         print(f"  summary saved to {summary_path}")
 
-        # k. 释放显存
+        # k. 释放 trainer（model_obj 已单独保留）
         del trainer
         torch.cuda.empty_cache()
-
-        # l. warm start: 下一轮用本轮 checkpoint
-        ckpt_subdirs = sorted(
-            [d for d in os.listdir(ckpt_dir) if d.startswith("checkpoint-")],
-            key=lambda x: int(x.split("-")[-1]),
-        )
-        if ckpt_subdirs:
-            model_path = os.path.join(ckpt_dir, ckpt_subdirs[-1])
-        else:
-            model_path = ckpt_dir
-        print(f"  next model_path = {model_path}")
 
     print(f"\n{'='*60}")
     print("GeoGuide training complete.")
