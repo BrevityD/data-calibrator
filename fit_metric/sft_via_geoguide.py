@@ -7,8 +7,7 @@
 import os
 import sys
 import json
-import time
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, asdict
 from pathlib import Path
 
 import numpy as np
