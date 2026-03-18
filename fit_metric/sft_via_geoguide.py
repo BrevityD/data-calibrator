@@ -50,9 +50,10 @@ class GeoGuideConfig:
     max_seq_length: int = 16384
     optim: str = "sgd"
     inner_num_train_epochs: int = 1    # 每轮 SFTTrainer 内部 epoch 数
+    train_device: str = "cuda:0"       # SFT 训练设备
 
     # --- 测地线 ---
-    geo_device: str = "cuda:4"         # 测地线计算设备
+    geo_device: str = "cuda:4"         # 测地线计算设备（与 train_device 分开避免显存冲突）
     geo_target_domain: str = "math"    # 优化目标领域: "math" → x=const, "code" → y=const
     geo_target_value: float = 0.2      # 目标直线的坐标值
     geo_K: int = 12                    # 多起点候选数
@@ -240,9 +241,40 @@ class TeeStream:
 # =========================================================
 # 6. 主循环
 # =========================================================
+def _parse_cuda_index(device_str: str) -> int:
+    """从 'cuda:N' 提取 N，'cpu' 返回 -1。"""
+    if device_str == "cpu":
+        return -1
+    return int(device_str.split(":")[-1])
+
+
 def main(cfg: GeoGuideConfig | None = None):
     if cfg is None:
         cfg = GeoGuideConfig()
+
+    # 设置 CUDA_VISIBLE_DEVICES，包含 train 和 geo 两张卡
+    # 必须在任何 CUDA 操作之前设置
+    train_idx = _parse_cuda_index(cfg.train_device)
+    geo_idx = _parse_cuda_index(cfg.geo_device)
+    if train_idx >= 0 and geo_idx >= 0:
+        if train_idx == geo_idx:
+            os.environ["CUDA_VISIBLE_DEVICES"] = str(train_idx)
+            # 两者共用同一张卡，重映射为 cuda:0
+            cfg = GeoGuideConfig(**{
+                **{k: v for k, v in cfg.__dict__.items()},
+                "train_device": "cuda:0",
+                "geo_device": "cuda:0",
+            })
+        else:
+            os.environ["CUDA_VISIBLE_DEVICES"] = f"{train_idx},{geo_idx}"
+            # 重映射: train → cuda:0, geo → cuda:1
+            cfg = GeoGuideConfig(**{
+                **{k: v for k, v in cfg.__dict__.items()},
+                "train_device": "cuda:0",
+                "geo_device": "cuda:1",
+            })
+    print(f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', 'not set')}")
+    print(f"  train_device={cfg.train_device}, geo_device={cfg.geo_device}")
 
     os.environ["WANDB_PROJECT"] = cfg.wandb_project
     os.makedirs(cfg.output_dir, exist_ok=True)
