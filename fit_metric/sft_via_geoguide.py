@@ -50,15 +50,14 @@ class GeoGuideConfig:
     per_device_train_batch_size: int = 4
     gradient_accumulation_steps: int = 4
     max_seq_length: int = 16384
-    optim: str = "adamw_torch"
     adam_beta1: float = 1e-12
     adam_beta2: float = 1e-12
     lr_scheduler_type: str = "constant"
-    max_steps: int = -1                # -1 表示由 num_train_epochs 控制
+    max_steps: int = 401
     inner_num_train_epochs: int = 100  # 每轮 SFTTrainer 内部 epoch 数（受 max_steps 截断）
     eval_steps: int = 1
     eval_on_start: bool = True
-    save_steps: int = 500
+    save_steps: int = 19
     train_device: str = "cuda:0"       # SFT 训练设备
 
     # --- 测地线 ---
@@ -374,7 +373,6 @@ def _run(cfg: GeoGuideConfig):
                 per_device_train_batch_size=cfg.per_device_train_batch_size,
                 num_train_epochs=1,
                 output_dir=ckpt_dir,
-                optim=cfg.optim,
                 remove_unused_columns=False,
                 seed=cfg.seed,
                 report_to="none",
@@ -427,7 +425,6 @@ def _run(cfg: GeoGuideConfig):
                 max_steps=cfg.max_steps,
                 logging_steps=1,
                 output_dir=ckpt_dir,
-                optim=cfg.optim,
                 remove_unused_columns=False,
                 adam_beta1=cfg.adam_beta1,
                 adam_beta2=cfg.adam_beta2,
