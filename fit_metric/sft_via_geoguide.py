@@ -433,6 +433,7 @@ def _run(cfg: GeoGuideConfig):
                 save_strategy="steps",
                 save_steps=cfg.save_steps,
                 save_only_model=True,
+                save_total_limit=3,
                 run_name=f"geoguide-epoch{epoch}",
                 report_to=cfg.report_to,
             ),
@@ -484,11 +485,11 @@ def _run(cfg: GeoGuideConfig):
             json.dump(summary_list, f, indent=2, ensure_ascii=False)
         print(f"  summary saved to {summary_path}")
 
-        # j. 释放显存
+        # k. 释放显存
         del trainer
         torch.cuda.empty_cache()
 
-        # k. warm start: 下一轮用本轮 checkpoint
+        # l. warm start: 下一轮用本轮 checkpoint
         ckpt_subdirs = sorted(
             [d for d in os.listdir(ckpt_dir) if d.startswith("checkpoint-")],
             key=lambda x: int(x.split("-")[-1]),
