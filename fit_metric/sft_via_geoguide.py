@@ -372,6 +372,7 @@ def _run(cfg: GeoGuideConfig):
                 logging_steps=1,
                 output_dir=ckpt_dir,
                 optim=cfg.optim,
+                remove_unused_columns=False,
                 adam_beta1=cfg.adam_beta1,
                 adam_beta2=cfg.adam_beta2,
                 lr_scheduler_type=cfg.lr_scheduler_type,
