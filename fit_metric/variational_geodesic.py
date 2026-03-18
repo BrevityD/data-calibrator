@@ -40,17 +40,18 @@ def variational_geodesic_to_line(
     tol=1e-8,
     grad_tol=1e-6,
     verbose=True,
+    target_axis=0,
 ):
     """
-    用 L-BFGS 最小化离散能量，求从 start 到直线 x=x_target 的最短测地线。
+    用 L-BFGS 最小化离散能量，求从 start 到目标直线的最短测地线。
 
     使用 sigmoid 重参数化：优化无约束的 raw_params，通过 sigmoid 映射到 (eps, 1-eps)，
     使 L-BFGS 始终在光滑无约束空间工作。
 
     参数:
         start: (x0, y0) 起点坐标
-        x_target: 目标直线 x = x_target
-        y_init: 终点 y 的初始猜测，默认 = start[1]
+        x_target: 目标直线的坐标值
+        y_init: 终点自由坐标的初始猜测，默认 = start 中对应的自由坐标
         init_path: 可选 numpy array (N+1, 2)，提供时跳过直线插值
         N: 离散段数（路径有 N+1 个点）
         lr: L-BFGS 学习率
@@ -58,6 +59,7 @@ def variational_geodesic_to_line(
         tol: 收敛容差（能量相对变化）
         grad_tol: 梯度范数收敛容差
         verbose: 是否打印优化过程
+        target_axis: 0 → 固定 x（到竖直线 x=x_target），1 → 固定 y（到水平线 y=x_target）
 
     返回:
         path: numpy array (N+1, 2) 最优路径
@@ -65,9 +67,12 @@ def variational_geodesic_to_line(
         arc_length: 度规弧长
         info: dict 包含优化细节
     """
+    fixed_axis = target_axis      # 终点固定的坐标轴
+    free_axis = 1 - target_axis   # 终点自由的坐标轴
+
     x0, y0 = start
     if y_init is None:
-        y_init = y0
+        y_init = start[free_axis]
 
     eps = 1e-4  # 坐标边界余量
 
@@ -81,16 +86,19 @@ def variational_geodesic_to_line(
         assert init_path.shape == (N + 1, 2), \
             f"init_path shape {init_path.shape} != ({N + 1}, 2)"
         ip = init_path.copy()
-        y_init = ip[-1, 1]
+        y_init = ip[-1, free_axis]
     else:
-        # start 到 (x_target, y_init) 的直线等分
+        # start 到终点的直线等分
         ip = np.zeros((N + 1, 2))
+        end_pt = [0.0, 0.0]
+        end_pt[fixed_axis] = x_target
+        end_pt[free_axis] = y_init
         for i in range(N + 1):
             t = i / N
-            ip[i, 0] = x0 * (1 - t) + x_target * t
-            ip[i, 1] = y0 * (1 - t) + y_init * t
+            ip[i, 0] = x0 * (1 - t) + end_pt[0] * t
+            ip[i, 1] = y0 * (1 - t) + end_pt[1] * t
 
-    # 自由变量：内部节点 (q_1 ... q_{N-1}) 的 xy + 终点 y
+    # 自由变量：内部节点 (q_1 ... q_{N-1}) 的 xy + 终点自由坐标
     # 共 2*(N-1) + 1 个标量，在无约束空间 ℝ 中优化
     n_free = 2 * (N - 1) + 1
     params = torch.zeros(n_free, dtype=get_dtype(), device=get_device(), requires_grad=True)
@@ -100,7 +108,7 @@ def variational_geodesic_to_line(
         for i in range(1, N):
             params[2 * (i - 1)] = to_raw(ip[i, 0])
             params[2 * (i - 1) + 1] = to_raw(ip[i, 1])
-        params[-1] = to_raw(y_init)  # 终点 y
+        params[-1] = to_raw(y_init)  # 终点自由坐标
 
     q0 = torch.tensor([x0, y0], dtype=get_dtype(), device=get_device())  # 固定起点
 
@@ -108,9 +116,12 @@ def variational_geodesic_to_line(
         """从无约束自由变量经 sigmoid 映射构建完整路径 (N+1, 2)"""
         coords = torch.sigmoid(p) * (1 - 2 * eps) + eps  # 映射到 (eps, 1-eps)
         inner = coords[:-1].reshape(N - 1, 2)                        # (N-1, 2)
-        y_end = coords[-1:]
-        x_end = torch.full_like(y_end, x_target)
-        endpoint = torch.cat([x_end, y_end])                    # (2,)
+        free_end = coords[-1:]
+        fixed_end = torch.full_like(free_end, x_target)
+        # 按 axis 组装终点: endpoint[fixed_axis]=x_target, endpoint[free_axis]=free_end
+        endpoint = torch.zeros(2, dtype=free_end.dtype, device=free_end.device)
+        endpoint[fixed_axis] = fixed_end[0]
+        endpoint[free_axis] = free_end[0]
         return torch.cat([q0.unsqueeze(0), inner, endpoint.unsqueeze(0)], dim=0)
 
     def compute_energy(p):
@@ -226,8 +237,9 @@ def batch_coarse_search(
     lr=0.01,
     tol=1e-7,
     verbose=True,
+    target_axis=0,
 ):
-    """用 Adam 并行优化 K 条从 start 到 x=x_target 的离散路径。
+    """用 Adam 并行优化 K 条从 start 到目标直线的离散路径。
 
     所有路径共享同一次 NN forward pass 以提高效率。
     使用直接坐标 + clamp 约束路径点在 (eps, 1-eps) 内，
@@ -235,18 +247,22 @@ def batch_coarse_search(
 
     参数:
         start: (x0, y0) 起点坐标
-        x_target: 目标直线 x = x_target
-        y_candidates: 长度为 K 的终点 y 初始猜测数组
+        x_target: 目标直线的坐标值
+        y_candidates: 长度为 K 的终点自由坐标初始猜测数组
         K: 并行路径数（y_candidates 为 None 时使用）
         N: 每条路径的离散段数
         max_iter: Adam 最大迭代次数
         lr: Adam 学习率
         tol: 收敛容差（所有路径能量相对变化）
         verbose: 是否打印优化过程
+        target_axis: 0 → 固定 x（竖直线），1 → 固定 y（水平线）
 
     返回:
-        candidates: list of dict，按 arc_length 升序排列
+        candidates: list of dict，按 energy 升序排列
     """
+    fixed_axis = target_axis
+    free_axis = 1 - target_axis
+
     if y_candidates is None:
         y_candidates = np.linspace(0.05, 0.95, K)
     else:
@@ -259,11 +275,14 @@ def batch_coarse_search(
     # 初始化 (K, n_free) 参数矩阵（直接坐标空间，Adam + clamp）
     all_params = torch.zeros(K, n_free, dtype=get_dtype(), device=get_device())
     for k, y_c in enumerate(y_candidates):
+        end_pt = [0.0, 0.0]
+        end_pt[fixed_axis] = x_target
+        end_pt[free_axis] = y_c
         for i in range(1, N):
             t = i / N
-            all_params[k, 2 * (i - 1)] = x0 * (1 - t) + x_target * t
-            all_params[k, 2 * (i - 1) + 1] = y0 * (1 - t) + y_c * t
-        all_params[k, -1] = y_c  # 终点 y
+            all_params[k, 2 * (i - 1)] = x0 * (1 - t) + end_pt[0] * t
+            all_params[k, 2 * (i - 1) + 1] = y0 * (1 - t) + end_pt[1] * t
+        all_params[k, -1] = y_c  # 终点自由坐标
     all_params = all_params.detach().requires_grad_(True)
 
     q0 = torch.tensor([x0, y0], dtype=get_dtype(), device=get_device())  # 固定起点
@@ -272,9 +291,12 @@ def batch_coarse_search(
         """从 (K, n_free) 经 clamp 构建 (K, N+1, 2) 路径"""
         coords = params.clamp(eps, 1 - eps)  # (K, n_free)
         inner = coords[:, :-1].reshape(K, N - 1, 2)           # (K, N-1, 2)
-        y_end = coords[:, -1:]                                  # (K, 1)
-        x_end = torch.full_like(y_end, x_target)
-        endpoint = torch.cat([x_end, y_end], dim=1).unsqueeze(1)  # (K, 1, 2)
+        free_end = coords[:, -1:]                               # (K, 1)
+        fixed_end = torch.full_like(free_end, x_target)
+        # 按 axis 组装终点
+        endpoint = torch.zeros(K, 1, 2, dtype=free_end.dtype, device=free_end.device)
+        endpoint[:, 0, fixed_axis] = fixed_end[:, 0]
+        endpoint[:, 0, free_axis] = free_end[:, 0]
         start_pt = q0.unsqueeze(0).unsqueeze(0).expand(K, 1, 2)   # (K, 1, 2)
         return torch.cat([start_pt, inner, endpoint], dim=1)       # (K, N+1, 2)
 
@@ -361,23 +383,24 @@ def multi_start_variational_geodesic_to_line(
     start, x_target=0.2, y_candidates=None, K=12,
     N=50, lr=1.0, max_iter=300, tol=1e-8, grad_tol=1e-5,
     refine_top_k=3, refine_N=100, refine_max_iter=300,
-    verbose=True,
+    verbose=True, target_axis=0,
 ):
     """
     多起点变分测地线搜索，避免局部最优。
 
-    阶段1（粗搜索）：用 batch_coarse_search 对 K 个终点 y 候选并行 Adam 优化
+    阶段1（粗搜索）：用 batch_coarse_search 对 K 个终点自由坐标候选并行 Adam 优化
     阶段2（精化）：取 top_k 个最优结果，用更多离散点 (refine_N) 进行 L-BFGS 精化
 
     参数:
         start: (x0, y0) 起点坐标
-        x_target: 目标直线 x = x_target
-        y_candidates: 终点 y 候选数组，None 时自动生成
+        x_target: 目标直线的坐标值
+        y_candidates: 终点自由坐标候选数组，None 时自动生成
         K: 候选数量
         N: 粗搜索离散段数
         refine_top_k: 精化阶段保留的最优候选数
         refine_N: 精化阶段离散段数
         refine_max_iter: 精化阶段最大迭代次数
+        target_axis: 0 → 固定 x（竖直线），1 → 固定 y（水平线）
 
     返回:
         best_path: numpy array (refine_N+1, 2) 最优路径
@@ -401,7 +424,7 @@ def multi_start_variational_geodesic_to_line(
     candidates = batch_coarse_search(
         start=start, x_target=x_target, y_candidates=y_candidates, K=K,
         N=N, lr=0.01,
-        verbose=verbose,
+        verbose=verbose, target_axis=target_axis,
     )
     t_coarse = time.time() - t_coarse_start
 
@@ -440,7 +463,7 @@ def multi_start_variational_geodesic_to_line(
         path, energy, arc_len, info = variational_geodesic_to_line(
             start=start, x_target=x_target, init_path=resampled,
             N=refine_N, lr=lr, max_iter=refine_max_iter,
-            verbose=verbose,
+            verbose=verbose, target_axis=target_axis,
         )
         refined.append({
             'y_init': c['y_init'],
@@ -475,11 +498,12 @@ def multi_start_variational_geodesic_to_line(
 # =========================================================
 # 3. 横截性检验
 # =========================================================
-def check_transversality(path):
+def check_transversality(path, target_axis=0):
     """
-    检验终点切向量与直线 x=const 的度规正交性。
-    直线切向量为 e_y = (0, 1)。
-    横截性条件：cos<tangent, e_y>_G = 0
+    检验终点切向量与目标直线的度规正交性。
+    target_axis=0: 直线 x=const，切向量为 e_y = (0, 1)
+    target_axis=1: 直线 y=const，切向量为 e_x = (1, 0)
+    横截性条件：cos<tangent, e_line>_G = 0
 
     返回:
         cos_angle: float, 归一化度规内积 cos(θ)（越接近 0 越正交）
@@ -493,13 +517,17 @@ def check_transversality(path):
     y_end = np.clip(float(endpoint[1]), 0.0, 1.0)
     G = metric_mat(x_end, y_end).cpu().numpy()
 
-    e_y = np.array([0.0, 1.0])
+    # 目标直线的切方向
+    if target_axis == 0:
+        e_line = np.array([0.0, 1.0])  # x=const 的切方向是 e_y
+    else:
+        e_line = np.array([1.0, 0.0])  # y=const 的切方向是 e_x
 
     # G-范数归一化，使内积 = cos(θ)
     norm_t = np.sqrt(tangent @ G @ tangent)
-    norm_e = np.sqrt(e_y @ G @ e_y)
+    norm_e = np.sqrt(e_line @ G @ e_line)
     if norm_t > 0 and norm_e > 0:
-        cos_angle = (tangent @ G @ e_y) / (norm_t * norm_e)
+        cos_angle = (tangent @ G @ e_line) / (norm_t * norm_e)
     else:
         cos_angle = float('nan')
 
@@ -529,6 +557,7 @@ def plot_variational_geodesic_to_line(
     ellipse_scale=0.05,
     save_path=None,
     log_path=None,
+    target_axis=0,
 ):
     """求解并可视化从 start 到直线 x=x_target 的变分测地线。
 
@@ -570,6 +599,7 @@ def plot_variational_geodesic_to_line(
                 grad_tol=grad_tol,
                 refine_top_k=refine_top_k, refine_N=refine_N,
                 refine_max_iter=refine_max_iter, verbose=True,
+                target_axis=target_axis,
             )
         candidates_summary = [
             {k: v for k, v in c.items() if k != 'path'}
@@ -581,15 +611,17 @@ def plot_variational_geodesic_to_line(
             start=start, x_target=x_target, y_init=y_init,
             N=N, lr=lr, max_iter=max_iter, tol=tol,
             grad_tol=grad_tol, verbose=True,
+            target_axis=target_axis,
         )
         candidate_paths = []
 
     # 横截性检验
-    trans_ip, tangent = check_transversality(path)
+    trans_ip, tangent = check_transversality(path, target_axis=target_axis)
 
+    line_dir_name = "e_y" if target_axis == 0 else "e_x"
     print("\n--- Transversality check ---")
     print(f"  terminal tangent   = ({tangent[0]:.6f}, {tangent[1]:.6f})")
-    print(f"  cos<tangent, e_y>_G = {trans_ip:.6e}")
+    print(f"  cos<tangent, {line_dir_name}>_G = {trans_ip:.6e}")
     print(f"  (should be ≈ 0 for orthogonality)")
 
     # 绘图
@@ -612,9 +644,13 @@ def plot_variational_geodesic_to_line(
     )
 
     # 目标直线
-    ax.axvline(x=x_target, linestyle='--', linewidth=1.5,
-               color='cyan' if show_heatmap else 'blue',
-               alpha=0.9, label=f'x = {x_target}')
+    line_color = 'cyan' if show_heatmap else 'blue'
+    if target_axis == 0:
+        ax.axvline(x=x_target, linestyle='--', linewidth=1.5,
+                   color=line_color, alpha=0.9, label=f'x = {x_target}')
+    else:
+        ax.axhline(y=x_target, linestyle='--', linewidth=1.5,
+                   color=line_color, alpha=0.9, label=f'y = {x_target}')
 
     # 候选路径（浅灰色）
     for i, cp in enumerate(candidate_paths):
@@ -713,13 +749,13 @@ if __name__ == '__main__':
     sys.stderr = TeeStream(sys.__stderr__, log_file)
 
     try:
-        start = (0.9, 1.0)
+        start = (1.0, 1.0)
         plot_variational_geodesic_to_line(
             start=start,
-            x_target=0.1,
+            x_target=0.2,
             N=100,
             max_iter=300,
-            y_candidates=np.linspace(0.05, 0.95, 12),
+            y_candidates=np.linspace(0.05, 0.95, 20),
             save_path=os.path.join(out_dir, 'variational_geodesic.png'),
         )
     finally:

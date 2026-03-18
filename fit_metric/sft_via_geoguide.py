@@ -54,7 +54,8 @@ class GeoGuideConfig:
 
     # --- 测地线 ---
     geo_device: str = "cuda:4"         # 测地线计算设备
-    geo_x_target: float = 0.2          # 目标直线 x = x_target
+    geo_target_domain: str = "math"    # 优化目标领域: "math" → x=const, "code" → y=const
+    geo_target_value: float = 0.2      # 目标直线的坐标值
     geo_K: int = 12                    # 多起点候选数
     geo_N: int = 50                    # 粗搜索离散段数
     geo_refine_top_k: int = 3
@@ -122,15 +123,22 @@ def normalize_losses(math_loss: float, code_loss: float, norm_params: dict):
 # 2. 测地线方向 & 配比映射
 # =========================================================
 def compute_geodesic_tangent(start_xy, cfg: GeoGuideConfig):
-    """调用 multi_start_variational_geodesic_to_line，返回起点处切向量。"""
+    """调用 multi_start_variational_geodesic_to_line，返回起点处切向量。
+
+    geo_target_domain="math" → target_axis=0, 到 x=geo_target_value 竖直线
+    geo_target_domain="code" → target_axis=1, 到 y=geo_target_value 水平线
+    """
+    target_axis = 0 if cfg.geo_target_domain == "math" else 1
+
     path, energy, arc_length, info, candidates = multi_start_variational_geodesic_to_line(
         start=start_xy,
-        x_target=cfg.geo_x_target,
+        x_target=cfg.geo_target_value,
         K=cfg.geo_K,
         N=cfg.geo_N,
         refine_top_k=cfg.geo_refine_top_k,
         refine_N=cfg.geo_refine_N,
         verbose=True,
+        target_axis=target_axis,
     )
     # 起点处切向量：path[1] - path[0]
     tangent = path[1] - path[0]
