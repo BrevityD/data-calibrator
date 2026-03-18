@@ -77,9 +77,6 @@ class GeoGuideConfig:
     m2c_json: str = str(_SCRIPT_DIR / "m2c.json")
     c2m_json: str = str(_SCRIPT_DIR / "c2m.json")
 
-    # --- 初始配比 ---
-    init_math_ratio: float = 0.5
-
     # --- 输出 ---
     output_dir: str = str(_SCRIPT_DIR / "result" / "sft_via_geoguide")
     seed: int = SEED
@@ -332,7 +329,6 @@ def _run(cfg: GeoGuideConfig):
     tokenizer = AutoTokenizer.from_pretrained(cfg.base_model_path)
 
     # --- 主循环 ---
-    math_ratio = cfg.init_math_ratio
     epoch_logs = []
 
     for epoch in range(cfg.num_epochs):
@@ -528,9 +524,6 @@ def parse_args() -> GeoGuideConfig:
     # 归一化数据源
     p.add_argument("--m2c_json", type=str, default=defaults.m2c_json)
     p.add_argument("--c2m_json", type=str, default=defaults.c2m_json)
-
-    # 初始配比
-    p.add_argument("--init_math_ratio", type=float, default=defaults.init_math_ratio)
 
     # 输出
     p.add_argument("--output_dir", type=str, default=defaults.output_dir)
