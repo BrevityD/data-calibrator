@@ -318,6 +318,17 @@ def _run(cfg: GeoGuideConfig):
         code_model_path=cfg.code_model_path,
     )
 
+    # --- 限制 Trainer 只用训练卡 ---
+    # geo_common 已在 geo_device 上初始化完毕，CUDA context 已建立，
+    # 此后缩减 CUDA_VISIBLE_DEVICES 不影响已有 tensor，
+    # 但 torch.cuda.device_count() 会返回 1，防止 Trainer 做 DataParallel。
+    if cfg.train_device != cfg.geo_device:
+        vis = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+        train_vis_idx = cfg.train_device.replace("cuda:", "")  # "0"
+        os.environ["CUDA_VISIBLE_DEVICES"] = vis.split(",")[int(train_vis_idx)]
+        print(f"  Shrunk CUDA_VISIBLE_DEVICES to {os.environ['CUDA_VISIBLE_DEVICES']} "
+              f"(Trainer single-GPU, geo_common stays on {cfg.geo_device})")
+
     # --- 加载数据集 ---
     print("Loading datasets ...")
     math_train, math_test = get_math_dataset(size=cfg.dataset_pool_size)
