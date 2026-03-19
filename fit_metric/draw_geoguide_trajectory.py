@@ -3,7 +3,7 @@
 
 读取 geoguide_log.json，在 log(det G) 热力图上绘制：
   - 模型归一化坐标的 epoch 间轨迹
-  - 每个 epoch 起点处重新计算的测地线路径
+  - 每个 epoch 起点处的测地线路径（从 JSON 中读取）
 """
 
 import os
@@ -12,37 +12,17 @@ import json
 import argparse
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.collections import LineCollection
 from pathlib import Path
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(_SCRIPT_DIR))
 
 import geo_common
-from variational_geodesic import multi_start_variational_geodesic_to_line
 
 
 def load_log(log_path: str) -> dict:
     with open(log_path, "r", encoding="utf-8") as f:
         return json.load(f)
-
-
-def recompute_geodesic(start_xy, cfg_dict: dict):
-    """用 log 中保存的测地线参数重新计算一条测地线路径。"""
-    target_domain = cfg_dict.get("geo_target_domain", "math")
-    target_axis = 0 if target_domain == "math" else 1
-
-    path, energy, arc_length, info, candidates = multi_start_variational_geodesic_to_line(
-        start=start_xy,
-        x_target=cfg_dict.get("geo_target_value", 0.2),
-        K=cfg_dict.get("geo_K", 12),
-        N=cfg_dict.get("geo_N", 50),
-        refine_top_k=cfg_dict.get("geo_refine_top_k", 3),
-        refine_N=cfg_dict.get("geo_refine_N", 100),
-        verbose=False,
-        target_axis=target_axis,
-    )
-    return path
 
 
 def draw(
@@ -53,7 +33,6 @@ def draw(
     ellipse_grid: int = 9,
     ellipse_scale: float = 0.05,
     save_path: str | None = None,
-    recompute: bool = True,
 ):
     log_data = load_log(log_path)
     cfg = log_data["config"]
@@ -63,7 +42,7 @@ def draw(
         print("No epoch data found in log.")
         return
 
-    # --- 初始化 geo_common ---
+    # --- 初始化 geo_common（heatmap / ellipse 需要模型） ---
     geo_common.init(
         device_str=geo_device,
         seed=cfg.get("seed", 42),
@@ -74,14 +53,13 @@ def draw(
     # --- 提取轨迹坐标 ---
     coords = np.array([e["normalized_xy"] for e in epochs])  # (n_epochs, 2)
 
-    # --- 重新计算每个 epoch 的测地线 ---
+    # --- 从 JSON 读取测地线路径 ---
     geo_paths = []
-    if recompute:
-        for i, e in enumerate(epochs):
-            xy = tuple(e["normalized_xy"])
-            print(f"Recomputing geodesic for epoch {e['epoch']} at ({xy[0]:.4f}, {xy[1]:.4f}) ...")
-            path = recompute_geodesic(xy, cfg)
-            geo_paths.append(path)
+    for e in epochs:
+        if "geodesic_path" in e:
+            geo_paths.append(np.array(e["geodesic_path"]))
+        else:
+            geo_paths.append(None)
 
     # --- 绘图 ---
     fig, ax = plt.subplots(figsize=(8, 7))
@@ -109,17 +87,20 @@ def draw(
                    color=line_color, alpha=0.8, label=f"y = {target_val}")
 
     # 测地线路径（每个 epoch 一条，渐变色）
-    n_geo = len(geo_paths)
+    valid_paths = [(i, p) for i, p in enumerate(geo_paths) if p is not None]
+    n_geo = len(valid_paths)
     geo_cmap = plt.cm.Oranges
-    for i, path in enumerate(geo_paths):
-        c = geo_cmap(0.35 + 0.6 * i / max(n_geo - 1, 1))
+    for idx, (i, path) in enumerate(valid_paths):
+        c = geo_cmap(0.35 + 0.6 * idx / max(n_geo - 1, 1))
         ax.plot(path[:, 0], path[:, 1], color=c, linewidth=1.2, alpha=0.7,
-                label=f"geodesic ep{epochs[i]['epoch']}" if i < 5 else None)
+                label=f"geodesic ep{epochs[i]['epoch']}" if idx < 5 else None)
+
+    if not valid_paths:
+        print("[WARN] No geodesic_path found in log. "
+              "Re-run sft_via_geoguide to generate paths, or use an older log.")
 
     # 模型轨迹（带箭头的折线）
     for i in range(len(coords) - 1):
-        dx = coords[i + 1, 0] - coords[i, 0]
-        dy = coords[i + 1, 1] - coords[i, 1]
         ax.annotate(
             "", xy=coords[i + 1], xytext=coords[i],
             arrowprops=dict(arrowstyle="-|>", color="red", lw=2.0, mutation_scale=12),
@@ -129,8 +110,7 @@ def draw(
     for i, (x, y) in enumerate(coords):
         ep = epochs[i]["epoch"]
         color = "lime" if i == 0 else ("yellow" if i == len(coords) - 1 else "white")
-        edge = "black"
-        ax.scatter([x], [y], color=color, s=70, edgecolors=edge, zorder=6)
+        ax.scatter([x], [y], color=color, s=70, edgecolors="black", zorder=6)
         ax.annotate(
             f"ep{ep}", (x, y), textcoords="offset points", xytext=(6, 6),
             fontsize=7, color="white" if show_heatmap else "black",
@@ -138,7 +118,7 @@ def draw(
             bbox=dict(boxstyle="round,pad=0.15", fc="black", alpha=0.5) if show_heatmap else None,
         )
 
-    # 在每个 epoch 标记点旁标注 ratio
+    # ratio 标注
     for i, e in enumerate(epochs):
         ratio_text = f"m:{e['math_ratio']:.2f}"
         ax.annotate(
@@ -173,8 +153,6 @@ def main():
     p.add_argument("--geo_device", type=str, default="cuda:0")
     p.add_argument("--save_path", type=str, default=default_save)
     p.add_argument("--no_heatmap", action="store_true")
-    p.add_argument("--no_recompute", action="store_true",
-                   help="跳过测地线重新计算（只画轨迹）")
     p.add_argument("--heatmap_n", type=int, default=120)
     p.add_argument("--ellipse_grid", type=int, default=9)
     p.add_argument("--ellipse_scale", type=float, default=0.05)
@@ -188,7 +166,6 @@ def main():
         ellipse_grid=args.ellipse_grid,
         ellipse_scale=args.ellipse_scale,
         save_path=args.save_path,
-        recompute=not args.no_recompute,
     )
 
 

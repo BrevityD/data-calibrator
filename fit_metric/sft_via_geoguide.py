@@ -456,6 +456,7 @@ def _run(cfg: GeoGuideConfig):
             "tangent": [float(tangent[0]), float(tangent[1])],
             "geodesic_energy": float(geo_energy),
             "geodesic_arc_length": float(geo_arc),
+            "geodesic_path": geo_path.tolist(),
             "epoch_steps": epoch_steps,
             "global_step": global_step,
             "checkpoint_dir": ckpt_dir,
