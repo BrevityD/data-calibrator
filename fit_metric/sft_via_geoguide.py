@@ -8,6 +8,7 @@ import os
 import sys
 import json
 import logging
+import shutil
 import argparse
 from dataclasses import dataclass, asdict
 from pathlib import Path
@@ -60,7 +61,8 @@ class GeoGuideConfig:
     target_loss: float = -1.0        # early stop 阈值（-1=不启用），检查 geo_target_domain 的 loss
     eval_steps: int = 1
     eval_on_start: bool = True
-    save_steps: int = 19
+    save_steps: int = 19             # 每隔多少个 segment 保存一次模型
+    save_total_limit: int = 3         # 最多保留几个 checkpoint
     train_device: str = "cuda:0"       # SFT 训练设备
 
     # --- 测地线 ---
@@ -376,6 +378,7 @@ def _run(cfg: GeoGuideConfig):
     segment_logs = []
     global_step = 0
     segment = 0
+    saved_checkpoints = []  # 外层 checkpoint 路径列表，用于 save_total_limit
 
     while segment < cfg.max_segments:
         print(f"\n{'='*60}")
@@ -479,10 +482,7 @@ def _run(cfg: GeoGuideConfig):
                 adam_beta2=cfg.adam_beta2,
                 lr_scheduler_type=cfg.lr_scheduler_type,
                 seed=cfg.seed,
-                save_strategy="steps",
-                save_steps=cfg.save_steps,
-                save_only_model=True,
-                save_total_limit=3,
+                save_strategy="no",
                 run_name=f"geoguide-seg{segment}",
                 report_to=cfg.report_to,
                 dataset_kwargs={"skip_prepare_dataset": True},
@@ -546,7 +546,21 @@ def _run(cfg: GeoGuideConfig):
             json.dump(summary_list, f, indent=2, ensure_ascii=False)
         print(f"  summary saved to {summary_path}")
 
-        # k. 释放 trainer（model_obj 已单独保留）
+        # k. 外层 checkpoint 保存
+        if cfg.save_steps > 0 and segment % cfg.save_steps == 0:
+            save_dir = os.path.join(cfg.output_dir, f"checkpoint_step{global_step}")
+            print(f"  Saving checkpoint to {save_dir} ...")
+            model_obj.save_pretrained(save_dir)
+            tokenizer.save_pretrained(save_dir)
+            saved_checkpoints.append(save_dir)
+            # 超出限制则删除最旧的
+            while len(saved_checkpoints) > cfg.save_total_limit:
+                old_dir = saved_checkpoints.pop(0)
+                if os.path.isdir(old_dir):
+                    shutil.rmtree(old_dir)
+                    print(f"  Removed old checkpoint: {old_dir}")
+
+        # l. 释放 trainer（model_obj 已单独保留）
         del trainer
         torch.cuda.empty_cache()
 
@@ -590,6 +604,7 @@ def parse_args() -> GeoGuideConfig:
     p.add_argument("--eval_steps", type=int, default=defaults.eval_steps)
     p.add_argument("--eval_on_start", action=argparse.BooleanOptionalAction, default=defaults.eval_on_start)
     p.add_argument("--save_steps", type=int, default=defaults.save_steps)
+    p.add_argument("--save_total_limit", type=int, default=defaults.save_total_limit)
     p.add_argument("--train_device", type=str, default=defaults.train_device)
 
     # 测地线
