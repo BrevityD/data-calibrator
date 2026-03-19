@@ -1,7 +1,7 @@
 """
 测地线指导的 SFT 数据配比迭代训练。
 
-每个 epoch：评估 math/code loss → 归一化到 [0,1]² → 计算测地线方向 → 调整配比 → 重新训练。
+每个 segment（N 个训练步）：评估 math/code loss → 归一化到 [0,1]² → 计算测地线方向 → 调整配比 → 训练 N 步。
 """
 
 import os
@@ -47,7 +47,8 @@ class GeoGuideConfig:
     code_test_size: int = 100
 
     # --- 训练超参 ---
-    max_epochs: int = 5              # 外层循环次数（每次 = 1 个完整 SFT epoch）
+    max_segments: int = 1000         # 外层循环安全上限
+    rebalance_steps: int = 20        # 每隔多少训练步重新配比
     learning_rate: float = 2e-7
     per_device_train_batch_size: int = 4
     gradient_accumulation_steps: int = 4
@@ -124,6 +125,29 @@ def normalize_losses(math_loss: float, code_loss: float, norm_params: dict):
     x = (math_loss - norm_params["math_min"]) / math_range if math_range > 0 else 0.0
     y = (code_loss - norm_params["code_min"]) / code_range if code_range > 0 else 0.0
     return float(np.clip(x, 0.0, 1.0)), float(np.clip(y, 0.0, 1.0))
+
+
+# =========================================================
+# 1b. 预 tokenize
+# =========================================================
+def pre_tokenize_pool(dataset, tokenizer, max_length: int):
+    """对 prompt/completion 格式的数据集做一次性 tokenize + truncate。
+
+    复用 SFTTrainer 内部逻辑：apply_chat_template → input_ids + completion_mask。
+    之后每段训练用 skip_prepare_dataset=True 跳过重复 tokenize。
+    """
+    def _tokenize(example):
+        prompt_ids = tokenizer.apply_chat_template(example["prompt"])
+        full_ids = tokenizer.apply_chat_template(
+            example["prompt"] + example["completion"]
+        )
+        completion_mask = [0] * len(prompt_ids) + [1] * (len(full_ids) - len(prompt_ids))
+        if len(full_ids) > max_length:
+            full_ids = full_ids[:max_length]
+            completion_mask = completion_mask[:max_length]
+        return {"input_ids": full_ids, "completion_mask": completion_mask}
+
+    return dataset.map(_tokenize)
 
 
 # =========================================================
@@ -339,21 +363,39 @@ def _run(cfg: GeoGuideConfig):
     model_obj = AutoModelForCausalLM.from_pretrained(cfg.base_model_path)
     tokenizer = AutoTokenizer.from_pretrained(cfg.base_model_path)
 
-    # --- 主循环 ---
-    epoch_logs = []
-    global_step = 0
+    # --- 预 tokenize 数据池（一次性开销） ---
+    print("Pre-tokenizing data pools ...")
+    math_train = pre_tokenize_pool(math_train, tokenizer, cfg.max_seq_length)
+    code_train = pre_tokenize_pool(code_train, tokenizer, cfg.max_seq_length)
+    math_test = pre_tokenize_pool(math_test, tokenizer, cfg.max_seq_length)
+    code_test = pre_tokenize_pool(code_test, tokenizer, cfg.max_seq_length)
+    print("  Pre-tokenization done.")
 
-    for epoch in range(cfg.max_epochs):
+    # --- 主循环 ---
+    segment_logs = []
+    global_step = 0
+    segment = 0
+
+    while segment < cfg.max_segments:
         print(f"\n{'='*60}")
-        print(f"Epoch {epoch}/{cfg.max_epochs}")
+        print(f"Segment {segment}/{cfg.max_segments}  (global_step={global_step})")
         print(f"{'='*60}")
 
+        # 计算本段训练步数
+        if cfg.max_steps > 0:
+            remaining = cfg.max_steps - global_step
+            if remaining <= 0:
+                print(f"  [STOP] global step budget exhausted: {global_step} >= {cfg.max_steps}")
+                break
+            segment_steps = min(cfg.rebalance_steps, remaining)
+        else:
+            segment_steps = cfg.rebalance_steps
+
         # a. 创建临时 trainer 用于评估当前模型
-        #    用一个 dummy 训练集（实际不会训练），只为调用 evaluate()
         dummy_train, _, _ = build_mixed_dataset(
             math_train, code_train, 0.5, min(10, cfg.total_train_size),
         )
-        ckpt_dir = os.path.join(cfg.output_dir, f"checkpoint_epoch{epoch}")
+        ckpt_dir = os.path.join(cfg.output_dir, f"checkpoint_step{global_step}")
         eval_test = {"math": math_test, "code": code_test}
         eval_trainer = SFTTrainer(
             model=model_obj,
@@ -370,6 +412,7 @@ def _run(cfg: GeoGuideConfig):
                 remove_unused_columns=False,
                 seed=cfg.seed,
                 report_to="none",
+                dataset_kwargs={"skip_prepare_dataset": True},
             ),
         )
 
@@ -411,7 +454,7 @@ def _run(cfg: GeoGuideConfig):
         )
         print(f"  mixed dataset: {n_math} math + {n_code} code = {len(mixed_train)}")
 
-        # g. 创建 SFTTrainer 训练（内层固定 1 epoch，不做 step 截断）
+        # g. 创建 SFTTrainer 训练（用 max_steps 控制段长）
         trainer = SFTTrainer(
             model=model_obj,
             processing_class=tokenizer,
@@ -426,8 +469,8 @@ def _run(cfg: GeoGuideConfig):
                 learning_rate=cfg.learning_rate,
                 per_device_train_batch_size=cfg.per_device_train_batch_size,
                 gradient_accumulation_steps=cfg.gradient_accumulation_steps,
-                num_train_epochs=1,
-                max_steps=-1,
+                num_train_epochs=9999,
+                max_steps=segment_steps,
                 logging_steps=1,
                 output_dir=ckpt_dir,
                 remove_unused_columns=False,
@@ -439,25 +482,26 @@ def _run(cfg: GeoGuideConfig):
                 save_steps=cfg.save_steps,
                 save_only_model=True,
                 save_total_limit=3,
-                run_name=f"geoguide-epoch{epoch}",
+                run_name=f"geoguide-seg{segment}",
                 report_to=cfg.report_to,
+                dataset_kwargs={"skip_prepare_dataset": True},
             ),
         )
 
         # h. 训练
-        print(f"  Training epoch {epoch} ...")
+        print(f"  Training segment {segment} for {segment_steps} steps ...")
         trainer.train()
 
         # h2. 累计步数
-        epoch_steps = trainer.state.global_step
-        global_step += epoch_steps
+        seg_steps_actual = trainer.state.global_step
+        global_step += seg_steps_actual
 
         # i. warm start: 保留训练后的模型对象供下一轮使用
         model_obj = trainer.model
 
-        # j. 保存 epoch 日志
-        epoch_log = {
-            "epoch": epoch,
+        # j. 保存 segment 日志
+        seg_log = {
+            "segment": segment,
             "math_ratio": math_ratio,
             "n_math": n_math,
             "n_code": n_code,
@@ -468,30 +512,30 @@ def _run(cfg: GeoGuideConfig):
             "geodesic_energy": float(geo_energy),
             "geodesic_arc_length": float(geo_arc),
             "geodesic_path": geo_path.tolist(),
-            "epoch_steps": epoch_steps,
+            "segment_steps": seg_steps_actual,
             "global_step": global_step,
             "checkpoint_dir": ckpt_dir,
         }
-        epoch_logs.append(epoch_log)
+        segment_logs.append(seg_log)
 
         # 写入完整日志
-        full_log = {"config": asdict(cfg), "epochs": epoch_logs}
+        full_log = {"config": asdict(cfg), "epochs": segment_logs}
         log_path = os.path.join(cfg.output_dir, "geoguide_log.json")
         with open(log_path, "w", encoding="utf-8") as f:
             json.dump(full_log, f, indent=2, ensure_ascii=False)
         print(f"  log saved to {log_path}")
 
-        # 写入 epoch 摘要（归一化前后坐标 + ratio）
+        # 写入 segment 摘要
         summary_path = os.path.join(cfg.output_dir, "epoch_summary.json")
         summary_entry = {
-            "epoch": epoch,
+            "segment": segment,
             "raw_loss": {"math": raw_math_loss, "code": raw_code_loss},
             "normalized": {"math": nx, "code": ny},
             "ratio": {"math": math_ratio, "code": code_ratio},
-            "epoch_steps": epoch_steps,
+            "segment_steps": seg_steps_actual,
             "global_step": global_step,
         }
-        if epoch == 0:
+        if segment == 0:
             summary_list = []
         else:
             with open(summary_path, "r", encoding="utf-8") as f:
@@ -509,6 +553,8 @@ def _run(cfg: GeoGuideConfig):
         if cfg.max_steps > 0 and global_step >= cfg.max_steps:
             print(f"  [STOP] global step budget: {global_step} >= {cfg.max_steps}")
             break
+
+        segment += 1
 
     print(f"\n{'='*60}")
     print("GeoGuide training complete.")
@@ -529,7 +575,8 @@ def parse_args() -> GeoGuideConfig:
     p.add_argument("--code_test_size", type=int, default=defaults.code_test_size)
 
     # 训练超参
-    p.add_argument("--max_epochs", type=int, default=defaults.max_epochs)
+    p.add_argument("--max_segments", type=int, default=defaults.max_segments)
+    p.add_argument("--rebalance_steps", type=int, default=defaults.rebalance_steps)
     p.add_argument("--learning_rate", type=float, default=defaults.learning_rate)
     p.add_argument("--per_device_train_batch_size", type=int, default=defaults.per_device_train_batch_size)
     p.add_argument("--gradient_accumulation_steps", type=int, default=defaults.gradient_accumulation_steps)

@@ -1,9 +1,9 @@
 """
-事后可视化 sft_via_geoguide 的训练轨迹和每个 epoch 的测地线。
+事后可视化 sft_via_geoguide 的训练轨迹和每个 segment 的测地线。
 
 读取 geoguide_log.json，在 log(det G) 热力图上绘制：
-  - 模型归一化坐标的 epoch 间轨迹
-  - 每个 epoch 起点处的测地线路径（从 JSON 中读取）
+  - 模型归一化坐标的 segment 间轨迹
+  - 每个 segment 起点处的测地线路径（从 JSON 中读取）
 """
 
 import os
@@ -39,7 +39,7 @@ def draw(
     epochs = log_data["epochs"]
 
     if not epochs:
-        print("No epoch data found in log.")
+        print("No segment data found in log.")
         return
 
     # --- 初始化 geo_common（heatmap / ellipse 需要模型） ---
@@ -93,7 +93,7 @@ def draw(
     for idx, (i, path) in enumerate(valid_paths):
         c = geo_cmap(0.35 + 0.6 * idx / max(n_geo - 1, 1))
         ax.plot(path[:, 0], path[:, 1], color=c, linewidth=1.2, alpha=0.7,
-                label=f"geodesic ep{epochs[i]['epoch']}" if idx < 5 else None)
+                label=f"geodesic seg{epochs[i].get('segment', epochs[i].get('epoch', i))}" if idx < 5 else None)
 
     if not valid_paths:
         print("[WARN] No geodesic_path found in log. "
@@ -106,13 +106,13 @@ def draw(
             arrowprops=dict(arrowstyle="-|>", color="red", lw=2.0, mutation_scale=12),
         )
 
-    # epoch 标记点
+    # segment 标记点
     for i, (x, y) in enumerate(coords):
-        ep = epochs[i]["epoch"]
+        seg = epochs[i].get("segment", epochs[i].get("epoch", i))
         color = "lime" if i == 0 else ("yellow" if i == len(coords) - 1 else "white")
         ax.scatter([x], [y], color=color, s=70, edgecolors="black", zorder=6)
         ax.annotate(
-            f"ep{ep}", (x, y), textcoords="offset points", xytext=(6, 6),
+            f"seg{seg}", (x, y), textcoords="offset points", xytext=(6, 6),
             fontsize=7, color="white" if show_heatmap else "black",
             fontweight="bold",
             bbox=dict(boxstyle="round,pad=0.15", fc="black", alpha=0.5) if show_heatmap else None,
@@ -133,7 +133,7 @@ def draw(
     ax.grid(True, alpha=0.3)
     ax.set_xlabel("normalized math loss")
     ax.set_ylabel("normalized code loss")
-    ax.set_title(f"GeoGuide trajectory ({len(epochs)} epochs)")
+    ax.set_title(f"GeoGuide trajectory ({len(epochs)} segments)")
     ax.legend(fontsize=7, loc="upper right")
 
     if save_path:
