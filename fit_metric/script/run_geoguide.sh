@@ -8,8 +8,8 @@ python -m fit_metric.sft_via_geoguide \
     --dataset_pool_size 1000 \
     --total_train_size 1000 \
     --max_segments 1000 \
-    --rebalance_steps 20 \
-    --max_steps 401 \
+    --rebalance_steps 19 \
+    --max_steps 500 \
     --target_loss 0.2 \
     --save_steps 19 \
     --eval_steps 999 \
