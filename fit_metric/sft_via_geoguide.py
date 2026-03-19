@@ -424,17 +424,17 @@ def _run(cfg: GeoGuideConfig):
         raw_code_loss = metrics["eval_code_loss"]
         print(f"  raw losses: math={raw_math_loss:.6f}, code={raw_code_loss:.6f}")
 
-        # b2. early stopping 检查（训练前 loss）
-        check_loss = raw_math_loss if cfg.geo_target_domain == "math" else raw_code_loss
-        if cfg.target_loss > 0 and check_loss <= cfg.target_loss:
-            print(f"  [STOP] target loss reached: {check_loss:.6f} <= {cfg.target_loss:.6f}")
-            del eval_trainer
-            torch.cuda.empty_cache()
-            break
-
         # c. 归一化
         nx, ny = normalize_losses(raw_math_loss, raw_code_loss, norm_params)
         print(f"  normalized: ({nx:.6f}, {ny:.6f})")
+
+        # c2. early stopping 检查（归一化后 loss）
+        check_loss = nx if cfg.geo_target_domain == "math" else ny
+        if cfg.target_loss > 0 and check_loss <= cfg.target_loss:
+            print(f"  [STOP] normalized target loss reached: {check_loss:.6f} <= {cfg.target_loss:.6f}")
+            del eval_trainer
+            torch.cuda.empty_cache()
+            break
 
         # d. 测地线方向
         print("  Computing geodesic tangent ...")
