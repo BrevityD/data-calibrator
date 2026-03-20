@@ -15,6 +15,6 @@ python -m fit_metric.sft_via_geoguide \
     --save_steps 10 \
     --eval_steps 999 \
     --no-eval_on_start \
-    --train_device cuda:7 \
-    --geo_device cuda:3 \
+    --train_device cuda:4 \
+    --geo_device cuda:5 \
     --report_to none

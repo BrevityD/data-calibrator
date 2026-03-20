@@ -49,7 +49,7 @@ class GeoGuideConfig:
 
     # --- 训练超参 ---
     max_segments: int = 1000         # 外层循环安全上限
-    rebalance_steps: int = 20        # 每隔多少训练步重新配比
+    rebalance_steps: int = 19        # 每隔多少训练步重新配比
     learning_rate: float = 2e-7
     per_device_train_batch_size: int = 4
     gradient_accumulation_steps: int = 4
