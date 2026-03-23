@@ -41,11 +41,12 @@ class GeoGradConfig:
     与 sft_via_geoguide.py 的 GeoGuideConfig 相比，移除了：
     - geo_device / geo_K / geo_N / geo_refine_* （不需要预训练向量场模型）
     - math_model_path / code_model_path （不需要预训练向量场模型）
-    - rebalance_steps / total_train_size / gradient_accumulation_steps
-      （本脚本每 epoch 只做一次梯度组合更新，不使用 SFTTrainer 的多步训练）
     新增：
     - eps: 正则化常数，防止 J J^T 奇异
-    - max_epochs: 外层循环上限（替代 max_segments）
+
+    结构对齐 sft_via_geoguide.py：
+    - 外层循环 (epoch): eval → 有限差分计算度规 → 确定 ratio
+    - 内层循环 (rebalance_steps): 用固定 ratio 做多步 combined gradient update
     """
     # --- 模型 ---
     base_model_path: str = "~/models/Qwen3-4B"
@@ -56,13 +57,16 @@ class GeoGradConfig:
     code_test_size: int = 100          # code 测试集大小（由 get_code_dataset 内部控制）
 
     # --- 训练超参 ---
-    max_epochs: int = 1000             # 最大训练轮数
+    max_epochs: int = 1000             # 外层循环上限（每轮重新计算度规和 ratio）
+    rebalance_steps: int = 19          # 内层循环步数：每轮用固定 ratio 跑多少个 effective step
     learning_rate: float = 2e-7        # Adam 学习率
-    per_device_train_batch_size: int = 4  # 每次前向/反向的 batch 大小
+    per_device_train_batch_size: int = 4  # 每次前向/反向的 micro batch 大小
+    gradient_accumulation_steps: int = 4  # 梯度累积步数，effective batch = batch_size * accum
     max_seq_length: int = 16384        # tokenize 时的最大序列长度
     adam_beta1: float = 1e-12          # Adam β1 ≈ 0，使动量几乎不累积（等效 SGD）
     adam_beta2: float = 1e-12          # Adam β2 ≈ 0，同上
     lr_scheduler_type: str = "constant"  # 恒定学习率（不衰减）
+    max_steps: int = -1                # 全局累计 effective step 上限（-1=不限）
     target_loss: float = -1.0          # early stop 阈值（-1=不启用），检查 geo_target_domain 的归一化 loss
     save_steps: int = 19               # 每隔多少个 epoch 保存一次 checkpoint
     save_total_limit: int = 3          # 最多保留几个 checkpoint（FIFO 淘汰）
@@ -520,24 +524,45 @@ def _run(cfg: GeoGradConfig):
                                  betas=(cfg.adam_beta1, cfg.adam_beta2))
 
     # --- 主循环 ---
-    # 每个 epoch 的完整流程：
-    #   eval → normalize → early stop check
-    #   → grad_math + finite_diff(v1) → grad_code + finite_diff(v2)
-    #   → build J, compute G, find ellipse direction, compute ratio
-    #   → combine gradients → optimizer.step()
-    #   → logging + checkpoint
+    # 外层 (epoch): eval → 有限差分算 v1/v2 → 算 ratio
+    # 内层 (rebalance_steps): 用固定 ratio 顺序遍历 math/code batch，
+    #   每 gradient_accumulation_steps 个 micro batch 做一次 optimizer.step()
+    # batch 遍历方式与 vanilla SFT 对齐：0-18, 19-38, 39-57, 58-63+0-13, ...
     epoch_logs = []
     saved_checkpoints = []
-    # 计算开销统计，用于与 baseline（纯 target_domain 数据训练）比较
     cost = {"forward_passes": 0, "backward_passes": 0, "eval_passes": 0,
             "wall_time_seconds": 0.0}
     t_start = time.time()
+    global_step = 0
+    # 持久化 DataLoader 迭代器，跨 epoch 连续遍历（模拟 vanilla SFT 的数据遍历顺序）
+    math_train_iter = iter(math_train_loader)
+    code_train_iter = iter(code_train_loader)
+
+    def _next_batch(loader_iter, loader):
+        """从迭代器取下一个 batch，耗尽则重建迭代器（新 epoch shuffle）。"""
+        try:
+            return next(loader_iter), loader_iter
+        except StopIteration:
+            loader_iter = iter(loader)
+            return next(loader_iter), loader_iter
 
     for epoch in range(cfg.max_epochs):
         t_epoch = time.time()
         print(f"\n{'='*60}")
-        print(f"Epoch {epoch}/{cfg.max_epochs}")
+        print(f"Epoch {epoch}/{cfg.max_epochs}  (global_step={global_step})")
         print(f"{'='*60}")
+
+        # 检查全局步数预算
+        if cfg.max_steps > 0 and global_step >= cfg.max_steps:
+            print(f"  [STOP] global step budget exhausted: {global_step} >= {cfg.max_steps}")
+            break
+
+        # 计算本 epoch 内层步数（受 max_steps 约束）
+        if cfg.max_steps > 0:
+            remaining = cfg.max_steps - global_step
+            epoch_steps = min(cfg.rebalance_steps, remaining)
+        else:
+            epoch_steps = cfg.rebalance_steps
 
         # 1. Evaluate: 在测试集上评估当前模型的 math/code loss
         print("  Evaluating ...")
@@ -582,10 +607,35 @@ def _run(cfg: GeoGradConfig):
         print(f"  ratio: math={ratio[0]:.4f}, code={ratio[1]:.4f}")
         print(f"  ellipse direction a = ({a[0]:.6f}, {a[1]:.6f})")
 
-        # 5. 按 ratio 组合 math/code 梯度，写入 param.grad，执行一步 Adam 更新
-        manual_update_grad(model, grad_math, grad_code, ratio)
-        optimizer.step()
-        optimizer.zero_grad()
+        # 5. 内层循环：用固定 ratio 跑 epoch_steps 个 effective step
+        #    每个 effective step = gradient_accumulation_steps 个 micro batch
+        #    顺序遍历 DataLoader，耗尽后重建（与 vanilla SFT 数据遍历对齐）
+        print(f"  Training {epoch_steps} steps with ratio math={ratio[0]:.4f}, code={ratio[1]:.4f} ...")
+        accum = cfg.gradient_accumulation_steps
+        model.train()
+        for step_i in range(epoch_steps):
+            optimizer.zero_grad()
+            for micro in range(accum):
+                # 取 math micro batch
+                math_batch, math_train_iter = _next_batch(math_train_iter, math_train_loader)
+                m_ids = math_batch["input_ids"].to(device)
+                m_attn = math_batch["attention_mask"].to(device)
+                m_lab = math_batch["labels"].to(device)
+                m_out = model(input_ids=m_ids, attention_mask=m_attn, labels=m_lab)
+                (m_out.loss / accum * ratio[0]).backward()
+                cost["forward_passes"] += 1; cost["backward_passes"] += 1
+
+                # 取 code micro batch
+                code_batch, code_train_iter = _next_batch(code_train_iter, code_train_loader)
+                c_ids = code_batch["input_ids"].to(device)
+                c_attn = code_batch["attention_mask"].to(device)
+                c_lab = code_batch["labels"].to(device)
+                c_out = model(input_ids=c_ids, attention_mask=c_attn, labels=c_lab)
+                (c_out.loss / accum * ratio[1]).backward()
+                cost["forward_passes"] += 1; cost["backward_passes"] += 1
+
+            optimizer.step()
+            global_step += 1
 
         epoch_time = time.time() - t_epoch
         cost["wall_time_seconds"] = time.time() - t_start
@@ -593,6 +643,8 @@ def _run(cfg: GeoGradConfig):
         # 6. 日志记录
         log_entry = {
             "epoch": epoch,
+            "global_step": global_step,
+            "epoch_steps": epoch_steps,
             "raw_math_loss": raw_math, "raw_code_loss": raw_code,
             "normalized_xy": [nx, ny],
             "v1": v1.tolist(), "v2": v2.tolist(),
@@ -621,6 +673,7 @@ def _run(cfg: GeoGradConfig):
         summary_path = os.path.join(cfg.output_dir, "epoch_summary.json")
         summary_entry = {
             "epoch": epoch,
+            "global_step": global_step,
             "raw_loss": {"math": raw_math, "code": raw_code},
             "normalized": {"math": nx, "code": ny},
             "ratio": {"math": float(ratio[0]), "code": float(ratio[1])},
@@ -661,7 +714,7 @@ def _run(cfg: GeoGradConfig):
 
     print(f"\n{'='*60}")
     print("Geo-grad training complete.")
-    print(f"  Total epochs: {len(epoch_logs)}")
+    print(f"  Total epochs: {len(epoch_logs)}, global_step: {global_step}")
     print(f"  Cost: {cost}")
     print(f"{'='*60}")
 
@@ -678,12 +731,15 @@ def parse_args() -> GeoGradConfig:
     p.add_argument("--math_test_size", type=int, default=defaults.math_test_size)
     p.add_argument("--code_test_size", type=int, default=defaults.code_test_size)
     p.add_argument("--max_epochs", type=int, default=defaults.max_epochs)
+    p.add_argument("--rebalance_steps", type=int, default=defaults.rebalance_steps)
     p.add_argument("--learning_rate", type=float, default=defaults.learning_rate)
     p.add_argument("--per_device_train_batch_size", type=int, default=defaults.per_device_train_batch_size)
+    p.add_argument("--gradient_accumulation_steps", type=int, default=defaults.gradient_accumulation_steps)
     p.add_argument("--max_seq_length", type=int, default=defaults.max_seq_length)
     p.add_argument("--adam_beta1", type=float, default=defaults.adam_beta1)
     p.add_argument("--adam_beta2", type=float, default=defaults.adam_beta2)
     p.add_argument("--lr_scheduler_type", type=str, default=defaults.lr_scheduler_type)
+    p.add_argument("--max_steps", type=int, default=defaults.max_steps)
     p.add_argument("--target_loss", type=float, default=defaults.target_loss)
     p.add_argument("--save_steps", type=int, default=defaults.save_steps)
     p.add_argument("--save_total_limit", type=int, default=defaults.save_total_limit)
