@@ -267,47 +267,37 @@ def ellipse_closest_to_line(G, target_domain, target_value, cx, cy):
     """在度规椭圆 x^T G x = 1 上找到距离目标直线最近的点。
 
     目标直线：
-    - target_domain="math" → 竖直线 x = target_value（在归一化 loss 空间中）
-    - target_domain="code" → 水平线 y = target_value
+    - target_domain="math" → 竖直线 x = target_value，法向量 n = [1, 0]
+    - target_domain="code" → 水平线 y = target_value，法向量 n = [0, 1]
 
-    算法（Cholesky 分解法）：
-    1. 对 G 做 Cholesky 分解: G = L @ L^T
-    2. 构造从当前位置 (cx, cy) 指向目标直线的方向向量 d
-    3. 变换到单位圆空间: w = L^T @ d
-    4. 在单位圆上找 w 方向的最近点: w_hat = w / ||w||
-    5. 变换回椭圆空间: a = L^{-T} @ w_hat
-
-    返回的 a 是椭圆上的点，表示在度规意义下朝目标直线的最优移动方向。
-    直觉：度规椭圆编码了 loss 空间的局部几何，沿椭圆上最近点方向移动
-    能以最小的度规距离（即最小的参数空间代价）接近目标。
+    算法：
+    椭圆 x^T G x = 1 上沿方向 n 的极值点为：
+        a = ± G^{-1} n / sqrt(n^T G^{-1} n)
+    这是 Lagrange 乘子法的解析解（最大化/最小化 n^T x subject to x^T G x = 1）。
+    取符号使 a 朝向目标直线（即 n^T a 与 target_value - current_value 同号）。
     """
     G_np = G.cpu().numpy() if isinstance(G, torch.Tensor) else G
-    L = np.linalg.cholesky(G_np)  # Cholesky 分解: G = L @ L.T
+    G_inv = np.linalg.inv(G_np)  # G^{-1} = J J^T + εI（即协方差矩阵 A）
 
-    # 从当前归一化坐标 (cx, cy) 指向目标直线的方向向量
+    # 目标直线的法向量
     if target_domain == "math":
-        d = np.array([target_value - cx, 0.0])  # 水平方向移动到 x=target_value
+        n = np.array([1.0, 0.0])
+        sign_ref = target_value - cx  # 需要朝 x 增大还是减小的方向
     else:
-        d = np.array([0.0, target_value - cy])  # 垂直方向移动到 y=target_value
+        n = np.array([0.0, 1.0])
+        sign_ref = target_value - cy
 
-    norm_d = np.linalg.norm(d)
-    if norm_d < 1e-15:
-        # 已经在目标线上，选择沿目标轴的单位方向
-        d = np.array([1.0, 0.0]) if target_domain == "math" else np.array([0.0, 1.0])
-        norm_d = 1.0
+    # 椭圆上沿 n 方向的极值点: a = G^{-1} n / sqrt(n^T G^{-1} n)
+    G_inv_n = G_inv @ n
+    denom = np.sqrt(n @ G_inv_n)
+    if denom < 1e-15:
+        return torch.tensor(n, dtype=torch.float64)
 
-    # 变换到单位圆空间: w = L^T @ d
-    w = L.T @ d
-    w_norm = np.linalg.norm(w)
-    if w_norm < 1e-15:
-        return torch.tensor([d[0], d[1]], dtype=torch.float64)
+    a = G_inv_n / denom
 
-    # 单位圆上 w 方向的最近点
-    w_hat = w / w_norm
-
-    # 变换回椭圆空间: a = L^{-T} @ w_hat
-    L_inv_T = np.linalg.inv(L.T)
-    a = L_inv_T @ w_hat
+    # 取符号使 a 朝向目标直线
+    if sign_ref < 0:
+        a = -a
 
     return torch.tensor(a, dtype=torch.float64)
 
