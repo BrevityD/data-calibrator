@@ -36,35 +36,46 @@ from datacalibrator.seed import SEED, set_seed
 # =========================================================
 @dataclass
 class GeoGradConfig:
+    """训练配置。
+
+    与 sft_via_geoguide.py 的 GeoGuideConfig 相比，移除了：
+    - geo_device / geo_K / geo_N / geo_refine_* （不需要预训练向量场模型）
+    - math_model_path / code_model_path （不需要预训练向量场模型）
+    - rebalance_steps / total_train_size / gradient_accumulation_steps
+      （本脚本每 epoch 只做一次梯度组合更新，不使用 SFTTrainer 的多步训练）
+    新增：
+    - eps: 正则化常数，防止 J J^T 奇异
+    - max_epochs: 外层循环上限（替代 max_segments）
+    """
     # --- 模型 ---
     base_model_path: str = "~/models/Qwen3-4B"
 
     # --- 数据 ---
-    dataset_pool_size: int = 1000
-    math_test_size: int = 100
-    code_test_size: int = 100
+    dataset_pool_size: int = 1000      # 从 math/code 数据集各加载多少条
+    math_test_size: int = 100          # math 测试集大小（由 get_math_dataset 内部控制）
+    code_test_size: int = 100          # code 测试集大小（由 get_code_dataset 内部控制）
 
     # --- 训练超参 ---
-    max_epochs: int = 1000
-    learning_rate: float = 2e-7
-    per_device_train_batch_size: int = 4
-    max_seq_length: int = 16384
-    adam_beta1: float = 1e-12
-    adam_beta2: float = 1e-12
-    lr_scheduler_type: str = "constant"
-    target_loss: float = -1.0
-    save_steps: int = 19
-    save_total_limit: int = 3
-    train_device: str = "cuda:0"
-    eps: float = 1e-8
+    max_epochs: int = 1000             # 最大训练轮数
+    learning_rate: float = 2e-7        # Adam 学习率
+    per_device_train_batch_size: int = 4  # 每次前向/反向的 batch 大小
+    max_seq_length: int = 16384        # tokenize 时的最大序列长度
+    adam_beta1: float = 1e-12          # Adam β1 ≈ 0，使动量几乎不累积（等效 SGD）
+    adam_beta2: float = 1e-12          # Adam β2 ≈ 0，同上
+    lr_scheduler_type: str = "constant"  # 恒定学习率（不衰减）
+    target_loss: float = -1.0          # early stop 阈值（-1=不启用），检查 geo_target_domain 的归一化 loss
+    save_steps: int = 19               # 每隔多少个 epoch 保存一次 checkpoint
+    save_total_limit: int = 3          # 最多保留几个 checkpoint（FIFO 淘汰）
+    train_device: str = "cuda:0"       # 训练设备
+    eps: float = 1e-8                  # 正则化常数，A = J J^T + eps * I 防止奇异
 
     # --- 测地线目标 ---
-    geo_target_domain: str = "math"
-    geo_target_value: float = 0.2
+    geo_target_domain: str = "math"    # 优化目标领域: "math" → 目标线 x=const, "code" → y=const
+    geo_target_value: float = 0.2      # 目标线在归一化坐标中的位置
 
     # --- 归一化数据源 ---
-    m2c_json: str = str(_SCRIPT_DIR / "m2c.json")
-    c2m_json: str = str(_SCRIPT_DIR / "c2m.json")
+    m2c_json: str = str(_SCRIPT_DIR / "m2c.json")  # math→code 方向的 loss 矩阵
+    c2m_json: str = str(_SCRIPT_DIR / "c2m.json")  # code→math 方向的 loss 矩阵
 
     # --- 输出 ---
     output_dir: str = str(_SCRIPT_DIR / "result" / "train_with_geo")
@@ -72,14 +83,19 @@ class GeoGradConfig:
 
     # --- wandb ---
     wandb_project: str = "data-calibrator"
-    report_to: str = "wandb"
+    report_to: str = "wandb"           # "wandb" 或 "none"
 
 
 # =========================================================
 # 1. 归一化参数（复用 sft_via_geoguide.py）
 # =========================================================
 def compute_normalization_params(m2c_path: str, c2m_path: str):
-    """从 m2c.json / c2m.json 提取全局 min-max 归一化参数。"""
+    """从 m2c.json / c2m.json 提取全局 min-max 归一化参数。
+
+    两个 JSON 文件记录了不同 math:code 配比下训练后的 eval loss 矩阵。
+    从中提取所有 math_loss 和 code_loss 的全局最小/最大值，
+    用于将原始 loss 映射到 [0,1]² 归一化坐标空间。
+    """
     def _load_matrix(path):
         with open(path, "r") as f:
             data = json.load(f)
@@ -102,7 +118,11 @@ def compute_normalization_params(m2c_path: str, c2m_path: str):
 
 
 def normalize_losses(math_loss: float, code_loss: float, norm_params: dict):
-    """原始 loss → [0,1]² 归一化坐标。"""
+    """原始 loss → [0,1]² 归一化坐标。
+
+    使用 min-max 归一化: x = (loss - min) / (max - min)，并 clip 到 [0, 1]。
+    归一化后 (x, y) 分别对应 math 和 code 维度在标准化空间中的位置。
+    """
     math_range = norm_params["math_max"] - norm_params["math_min"]
     code_range = norm_params["code_max"] - norm_params["code_min"]
     x = (math_loss - norm_params["math_min"]) / math_range if math_range > 0 else 0.0
@@ -114,7 +134,14 @@ def normalize_losses(math_loss: float, code_loss: float, norm_params: dict):
 # 1b. 预 tokenize（复用 sft_via_geoguide.py）
 # =========================================================
 def pre_tokenize_pool(dataset, tokenizer, max_length: int):
-    """对 prompt/completion 格式的数据集做一次性 tokenize + truncate。"""
+    """对 prompt/completion 格式的数据集做一次性 tokenize + truncate。
+
+    使用 apply_chat_template 将 prompt 和 completion 转为 token ids，
+    同时生成 completion_mask 标记哪些 token 属于 completion 部分（用于计算 loss）。
+    超过 max_length 的序列会被截断。
+
+    返回的数据集包含 input_ids 和 completion_mask 两个字段。
+    """
     def _tokenize(example):
         prompt_ids = tokenizer.apply_chat_template(example["prompt"])
         full_ids = tokenizer.apply_chat_template(
@@ -133,7 +160,16 @@ def pre_tokenize_pool(dataset, tokenizer, max_length: int):
 # 2. DataLoader collate
 # =========================================================
 def sft_collate_fn(batch, pad_token_id: int):
-    """Collate for DataLoader: pad input_ids, create attention_mask and labels."""
+    """DataLoader 的 collate 函数：将变长样本 pad 到同一长度。
+
+    对每个样本：
+    1. input_ids 右侧填充 pad_token_id 到 batch 内最大长度
+    2. attention_mask: 真实 token 为 1，pad 为 0
+    3. labels: 从 input_ids 复制，但 prompt 部分（completion_mask=0）和 pad 部分设为 -100
+       （CrossEntropyLoss 会忽略 -100，只在 completion token 上计算 loss）
+
+    返回 dict: {input_ids, attention_mask, labels}，每个都是 (batch_size, max_len) 的 tensor。
+    """
     input_ids_list = [torch.tensor(ex["input_ids"], dtype=torch.long) for ex in batch]
     completion_masks = [torch.tensor(ex["completion_mask"], dtype=torch.long) for ex in batch]
 
@@ -167,7 +203,14 @@ def sft_collate_fn(batch, pad_token_id: int):
 # =========================================================
 @torch.no_grad()
 def evaluate_losses(model, math_loader, code_loader, device):
-    """Forward-only eval on test sets, return average loss per domain."""
+    """在测试集上做 forward-only 评估，返回 math 和 code 的平均 loss。
+
+    对每个 domain 的 DataLoader 遍历所有 batch，累加 loss * n_tokens，
+    最后除以总 token 数得到 token 级平均 loss。
+    使用 (labels != -100) 统计有效 token 数（排除 prompt 和 pad）。
+
+    注意：评估前切换到 eval 模式（关闭 dropout 等），评估后恢复 train 模式。
+    """
     model.eval()
     losses = {}
     for name, loader in [("math", math_loader), ("code", code_loader)]:
@@ -187,7 +230,18 @@ def evaluate_losses(model, math_loader, code_loader, device):
 
 
 def compute_domain_gradient(model, dataloader, device):
-    """Single batch forward+backward, return cloned per-param gradients."""
+    """对单个 domain 的一个 batch 做 forward+backward，返回克隆的逐参数梯度。
+
+    流程：
+    1. 取 DataLoader 的第一个 batch
+    2. 前向传播计算 loss
+    3. 反向传播计算梯度
+    4. 克隆每个参数的 .grad（深拷贝，与计算图解耦）
+    5. 清零模型梯度，避免影响后续计算
+
+    返回 list[Tensor]，与 model.parameters() 一一对应。
+    无梯度的参数（如 frozen 层）返回零张量。
+    """
     model.train()
     model.zero_grad()
     batch = next(iter(dataloader))
@@ -210,38 +264,48 @@ def compute_domain_gradient(model, dataloader, device):
 # 4. 椭圆最近点 & 度规计算
 # =========================================================
 def ellipse_closest_to_line(G, target_domain, target_value, cx, cy):
-    """Find point on ellipse x^T G x = 1 closest to target line.
+    """在度规椭圆 x^T G x = 1 上找到距离目标直线最近的点。
 
-    target_domain="math" → vertical line x=target_value (minimize |px - target_value|)
-    target_domain="code" → horizontal line y=target_value (minimize |py - target_value|)
+    目标直线：
+    - target_domain="math" → 竖直线 x = target_value（在归一化 loss 空间中）
+    - target_domain="code" → 水平线 y = target_value
 
-    Uses Cholesky: G = L L^T, transform to unit circle, find closest point, transform back.
+    算法（Cholesky 分解法）：
+    1. 对 G 做 Cholesky 分解: G = L @ L^T
+    2. 构造从当前位置 (cx, cy) 指向目标直线的方向向量 d
+    3. 变换到单位圆空间: w = L^T @ d
+    4. 在单位圆上找 w 方向的最近点: w_hat = w / ||w||
+    5. 变换回椭圆空间: a = L^{-T} @ w_hat
+
+    返回的 a 是椭圆上的点，表示在度规意义下朝目标直线的最优移动方向。
+    直觉：度规椭圆编码了 loss 空间的局部几何，沿椭圆上最近点方向移动
+    能以最小的度规距离（即最小的参数空间代价）接近目标。
     """
     G_np = G.cpu().numpy() if isinstance(G, torch.Tensor) else G
-    L = np.linalg.cholesky(G_np)  # G = L @ L.T
+    L = np.linalg.cholesky(G_np)  # Cholesky 分解: G = L @ L.T
 
-    # target direction in original space: unit vector toward the target line
+    # 从当前归一化坐标 (cx, cy) 指向目标直线的方向向量
     if target_domain == "math":
-        d = np.array([target_value - cx, 0.0])
+        d = np.array([target_value - cx, 0.0])  # 水平方向移动到 x=target_value
     else:
-        d = np.array([0.0, target_value - cy])
+        d = np.array([0.0, target_value - cy])  # 垂直方向移动到 y=target_value
 
     norm_d = np.linalg.norm(d)
     if norm_d < 1e-15:
-        # already on target line, pick arbitrary direction
+        # 已经在目标线上，选择沿目标轴的单位方向
         d = np.array([1.0, 0.0]) if target_domain == "math" else np.array([0.0, 1.0])
         norm_d = 1.0
 
-    # transform to unit-circle space: w = L^T @ d
+    # 变换到单位圆空间: w = L^T @ d
     w = L.T @ d
     w_norm = np.linalg.norm(w)
     if w_norm < 1e-15:
         return torch.tensor([d[0], d[1]], dtype=torch.float64)
 
-    # closest point on unit circle to direction w
+    # 单位圆上 w 方向的最近点
     w_hat = w / w_norm
 
-    # transform back: a = L^{-T} @ w_hat (point on ellipse)
+    # 变换回椭圆空间: a = L^{-T} @ w_hat
     L_inv_T = np.linalg.inv(L.T)
     a = L_inv_T @ w_hat
 
@@ -249,19 +313,32 @@ def ellipse_closest_to_line(G, target_domain, target_value, cx, cy):
 
 
 def compute_metric_and_ratio(v1, v2, target_domain, target_value, nx, ny, eps):
-    """Build J from v1/v2, compute G, find ellipse direction, compute ratio.
+    """从有限差分方向 v1/v2 构建 Jacobian，计算度规张量 G，求椭圆最优方向和配比。
 
-    Returns: (ratio, a, G) where ratio is [r_math, r_code] summing to 1.
+    算法步骤：
+    1. 构建 Jacobian: J = [v1 | v2]，列向量分别是 math/code 梯度在归一化 loss 空间的效果
+    2. 计算度规张量: A = J @ J^T + eps*I, G = A^{-1}
+       - A 是 loss 空间的协方差矩阵，G 是其逆（度规张量）
+       - eps 正则化防止 J 秩不足时 A 奇异
+    3. 在度规椭圆 x^T G x = 1 上找距目标线最近的点 a
+    4. 通过 J^{-1} @ a 将 loss 空间方向映射回 ratio 空间
+       - delta_ratio[0] 对应 math 梯度的权重，delta_ratio[1] 对应 code
+    5. 取绝对值并归一化为和为 1 的配比
+
+    返回: (ratio, a, G)
+    - ratio: [r_math, r_code]，用于组合 grad_math 和 grad_code
+    - a: 椭圆上的最优方向向量
+    - G: 2×2 度规张量
     """
-    J = np.column_stack([v1, v2])  # (2, 2)
-    A = J @ J.T + eps * np.eye(2)
-    G = np.linalg.inv(A)
+    J = np.column_stack([v1, v2])  # (2, 2): 列向量是各 domain 梯度的 loss 空间效果
+    A = J @ J.T + eps * np.eye(2)  # 正则化协方差矩阵
+    G = np.linalg.inv(A)           # 度规张量 G = (J J^T + εI)^{-1}
 
-    # find optimal direction on ellipse
+    # 在度规椭圆上找距目标线最近的点
     a = ellipse_closest_to_line(G, target_domain, target_value, nx, ny)
     a_np = a.numpy()
 
-    # ratio = |J^{-1} @ a| normalized
+    # 将 loss 空间方向 a 映射回 ratio 空间: delta_ratio = J^{-1} @ a
     try:
         J_inv = np.linalg.inv(J)
     except np.linalg.LinAlgError:
@@ -269,10 +346,11 @@ def compute_metric_and_ratio(v1, v2, target_domain, target_value, nx, ny, eps):
         J_inv = np.linalg.pinv(J)
 
     delta_ratio = J_inv @ a_np
+    # 取绝对值并归一化（负系数表示该 domain 梯度方向需要反转，取 abs 后仍保留其贡献）
     abs_delta = np.abs(delta_ratio)
     s = abs_delta.sum()
     if s < 1e-12:
-        ratio = np.array([0.5, 0.5])
+        ratio = np.array([0.5, 0.5])  # 退化情况：均匀配比
     else:
         ratio = abs_delta / s
 
@@ -283,7 +361,13 @@ def compute_metric_and_ratio(v1, v2, target_domain, target_value, nx, ny, eps):
 # 5. 梯度组合 & 更新
 # =========================================================
 def manual_update_grad(model, grad_math, grad_code, ratio):
-    """Set param.grad = ratio[0]*gm + ratio[1]*gc for optimizer.step()."""
+    """将组合梯度写入模型参数的 .grad 字段，供 optimizer.step() 使用。
+
+    combined_grad = ratio[0] * grad_math + ratio[1] * grad_code
+
+    这样 Adam optimizer 会用组合后的梯度做一步更新，
+    等效于按 ratio 配比混合两个 domain 的训练信号。
+    """
     for p, gm, gc in zip(model.parameters(), grad_math, grad_code):
         p.grad = ratio[0] * gm + ratio[1] * gc
 
@@ -292,6 +376,7 @@ def manual_update_grad(model, grad_math, grad_code, ratio):
 # 6. stdout/stderr tee
 # =========================================================
 class TeeStream:
+    """同时写入原始流和日志文件的流包装器，用于捕获 stdout/stderr 到日志。"""
     def __init__(self, original, log_file):
         self.original = original
         self.log_file = log_file
@@ -306,6 +391,7 @@ class TeeStream:
 
 
 def _parse_cuda_index(device_str: str) -> int:
+    """从 'cuda:N' 提取 N，'cpu' 返回 -1。"""
     if device_str == "cpu":
         return -1
     return int(device_str.split(":")[-1])
@@ -316,9 +402,19 @@ def _parse_cuda_index(device_str: str) -> int:
 # =========================================================
 def finite_diff_direction(model, optimizer, grads, math_eval_loader, code_eval_loader,
                           device, norm_params, nx_before, ny_before):
-    """Apply tentative gradient step, re-evaluate, measure Δloss, restore state.
+    """有限差分法测量单个 domain 梯度在归一化 loss 空间中的效果方向。
 
-    Returns: v = (Δnx, Δny) — the direction in normalized loss space.
+    流程：
+    1. 深拷贝模型权重和优化器状态（备份）
+    2. 将 grads 写入 param.grad，执行一步 optimizer.step()（tentative step）
+    3. 重新评估 math/code loss 并归一化
+    4. 计算 Δ(nx, ny) = (nx_after - nx_before, ny_after - ny_before)
+    5. 恢复模型和优化器到备份状态
+
+    返回: v = (Δnx, Δny)，表示该 domain 梯度一步更新后在归一化 loss 空间的位移方向。
+    这个方向向量将作为 Jacobian J 的列向量。
+
+    计算开销：1 次 optimizer step + 2 次 eval（math + code）+ 状态备份/恢复。
     """
     # backup model + optimizer state
     model_state = copy.deepcopy(model.state_dict())
@@ -428,12 +524,21 @@ def _run(cfg: GeoGradConfig):
                                   shuffle=False, collate_fn=collate)
 
     # --- Adam optimizer ---
+    # beta1 ≈ 0, beta2 ≈ 0 使 Adam 退化为近似 SGD（不累积动量和二阶矩）
+    # 配合 constant LR，与 sft_via_geoguide.py 的训练设置一致
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.learning_rate,
                                  betas=(cfg.adam_beta1, cfg.adam_beta2))
 
     # --- 主循环 ---
+    # 每个 epoch 的完整流程：
+    #   eval → normalize → early stop check
+    #   → grad_math + finite_diff(v1) → grad_code + finite_diff(v2)
+    #   → build J, compute G, find ellipse direction, compute ratio
+    #   → combine gradients → optimizer.step()
+    #   → logging + checkpoint
     epoch_logs = []
     saved_checkpoints = []
+    # 计算开销统计，用于与 baseline（纯 target_domain 数据训练）比较
     cost = {"forward_passes": 0, "backward_passes": 0, "eval_passes": 0,
             "wall_time_seconds": 0.0}
     t_start = time.time()
@@ -444,47 +549,50 @@ def _run(cfg: GeoGradConfig):
         print(f"Epoch {epoch}/{cfg.max_epochs}")
         print(f"{'='*60}")
 
-        # 1. Evaluate
+        # 1. Evaluate: 在测试集上评估当前模型的 math/code loss
         print("  Evaluating ...")
         raw_math, raw_code = evaluate_losses(model, math_eval_loader, code_eval_loader, device)
-        cost["eval_passes"] += 2  # math + code eval
+        cost["eval_passes"] += 2  # math eval + code eval 各一次
         nx, ny = normalize_losses(raw_math, raw_code, norm_params)
         print(f"  raw: math={raw_math:.6f}, code={raw_code:.6f}")
         print(f"  normalized: ({nx:.6f}, {ny:.6f})")
 
-        # early stopping
+        # early stopping: 检查目标 domain 的归一化 loss 是否已达标
         check_loss = nx if cfg.geo_target_domain == "math" else ny
         if cfg.target_loss > 0 and check_loss <= cfg.target_loss:
             print(f"  [STOP] target reached: {check_loss:.6f} <= {cfg.target_loss:.6f}")
             break
 
-        # 2. grad_math + v1 (finite diff)
+        # 2. 计算 math 梯度 + 有限差分方向 v1
+        #    grad_math: 在 math batch 上的参数梯度（1 forward + 1 backward）
+        #    v1: tentative step 后在归一化 loss 空间的位移（1 forward + 2 eval）
         print("  Computing math gradient + v1 ...")
         grad_math = compute_domain_gradient(model, math_train_loader, device)
         cost["forward_passes"] += 1; cost["backward_passes"] += 1
         v1 = finite_diff_direction(model, optimizer, grad_math,
                                    math_eval_loader, code_eval_loader,
                                    device, norm_params, nx, ny)
-        cost["forward_passes"] += 1; cost["eval_passes"] += 2
+        cost["forward_passes"] += 1; cost["eval_passes"] += 2  # tentative step 中的 eval
         print(f"  v1 = ({v1[0]:.8f}, {v1[1]:.8f})")
 
-        # 3. grad_code + v2 (finite diff)
+        # 3. 计算 code 梯度 + 有限差分方向 v2（同上）
         print("  Computing code gradient + v2 ...")
         grad_code = compute_domain_gradient(model, code_train_loader, device)
         cost["forward_passes"] += 1; cost["backward_passes"] += 1
         v2 = finite_diff_direction(model, optimizer, grad_code,
                                    math_eval_loader, code_eval_loader,
                                    device, norm_params, nx, ny)
-        cost["forward_passes"] += 1; cost["eval_passes"] += 2
+        cost["forward_passes"] += 1; cost["eval_passes"] += 2  # tentative step 中的 eval
         print(f"  v2 = ({v2[0]:.8f}, {v2[1]:.8f})")
 
-        # 4. Metric G, ellipse direction, ratio
+        # 4. 构建 Jacobian J=[v1|v2]，计算度规 G=(JJ^T+εI)^{-1}，
+        #    在度规椭圆上找最优方向 a，通过 J^{-1} 映射为 ratio
         ratio, a, G = compute_metric_and_ratio(
             v1, v2, cfg.geo_target_domain, cfg.geo_target_value, nx, ny, cfg.eps)
         print(f"  ratio: math={ratio[0]:.4f}, code={ratio[1]:.4f}")
         print(f"  ellipse direction a = ({a[0]:.6f}, {a[1]:.6f})")
 
-        # 5. Combined gradient → optimizer step
+        # 5. 按 ratio 组合 math/code 梯度，写入 param.grad，执行一步 Adam 更新
         manual_update_grad(model, grad_math, grad_code, ratio)
         optimizer.step()
         optimizer.zero_grad()
@@ -492,7 +600,7 @@ def _run(cfg: GeoGradConfig):
         epoch_time = time.time() - t_epoch
         cost["wall_time_seconds"] = time.time() - t_start
 
-        # 6. Logging
+        # 6. 日志记录
         log_entry = {
             "epoch": epoch,
             "raw_math_loss": raw_math, "raw_code_loss": raw_code,
@@ -514,12 +622,12 @@ def _run(cfg: GeoGradConfig):
                 "epoch_time": epoch_time,
             })
 
-        # full log
+        # 完整日志（每次覆盖写入，包含全部 config + 所有 epoch 数据）
         full_log = {"config": asdict(cfg), "epochs": epoch_logs}
         with open(os.path.join(cfg.output_dir, "geo_grad_log.json"), "w") as f:
             json.dump(full_log, f, indent=2, ensure_ascii=False)
 
-        # epoch summary (incremental)
+        # epoch 摘要（增量追加，便于快速查看训练进展）
         summary_path = os.path.join(cfg.output_dir, "epoch_summary.json")
         summary_entry = {
             "epoch": epoch,
@@ -536,11 +644,11 @@ def _run(cfg: GeoGradConfig):
         with open(summary_path, "w") as f:
             json.dump(summary_list, f, indent=2, ensure_ascii=False)
 
-        # cost summary
+        # 计算开销摘要（每次覆盖，便于随时查看当前累计开销）
         with open(os.path.join(cfg.output_dir, "cost_summary.json"), "w") as f:
             json.dump(cost, f, indent=2)
 
-        # checkpoint
+        # checkpoint 保存（FIFO 淘汰旧 checkpoint）
         if cfg.save_steps > 0 and epoch % cfg.save_steps == 0:
             save_dir = os.path.join(cfg.output_dir, f"checkpoint_epoch{epoch}")
             print(f"  Saving checkpoint to {save_dir} ...")
