@@ -162,6 +162,7 @@ def evaluate_losses(model, tokenizer, math_train, math_test, code_test, cfg):
             eval_strategy="no",
             max_length=cfg.max_seq_length,
             per_device_train_batch_size=cfg.per_device_train_batch_size,
+            per_device_eval_batch_size=cfg.per_device_train_batch_size,
             num_train_epochs=1,
             output_dir=ckpt_dir,
             remove_unused_columns=False,
