@@ -18,6 +18,7 @@ from pathlib import Path
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _PROJECT_ROOT = _SCRIPT_DIR.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
+sys.path.insert(0, str(_SCRIPT_DIR))
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
