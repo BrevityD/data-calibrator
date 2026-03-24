@@ -142,53 +142,38 @@ def pre_tokenize_pool(dataset, tokenizer, max_length: int):
 
 
 # =========================================================
-# 2. 评估（DataLoader-based，用于 finite-diff 前后对比）
+# 2. 评估（SFTTrainer-based，与 sft_via_geoguide.py 对齐）
 # =========================================================
-def _eval_collate_fn(batch, pad_token_id: int):
-    """eval 用的 collate：变长样本 pad 到同一长度。"""
-    input_ids_list = [torch.tensor(ex["input_ids"], dtype=torch.long) for ex in batch]
-    completion_masks = [torch.tensor(ex["completion_mask"], dtype=torch.long) for ex in batch]
+def evaluate_losses(model, tokenizer, math_train, math_test, code_test, cfg):
+    """用 SFTTrainer.evaluate() 评估 math/code loss，与 sft_via_geoguide.py 对齐。"""
+    from trl import SFTTrainer, SFTConfig
 
-    max_len = max(ids.size(0) for ids in input_ids_list)
-
-    padded_ids, attn_masks, labels_list = [], [], []
-    for ids, cmask in zip(input_ids_list, completion_masks):
-        pad_len = max_len - ids.size(0)
-        padded = torch.cat([ids, torch.full((pad_len,), pad_token_id, dtype=torch.long)])
-        attn = torch.cat([torch.ones_like(ids), torch.zeros(pad_len, dtype=torch.long)])
-        lab = padded.clone()
-        lab[:cmask.size(0)][cmask == 0] = -100
-        if pad_len > 0:
-            lab[-pad_len:] = -100
-        padded_ids.append(padded)
-        attn_masks.append(attn)
-        labels_list.append(lab)
-
-    return {
-        "input_ids": torch.stack(padded_ids),
-        "attention_mask": torch.stack(attn_masks),
-        "labels": torch.stack(labels_list),
-    }
-
-
-@torch.no_grad()
-def evaluate_losses(model, math_loader, code_loader, device):
-    """在测试集上评估，返回 math 和 code 的平均 loss。"""
-    model.eval()
-    losses = {}
-    for name, loader in [("math", math_loader), ("code", code_loader)]:
-        total_loss, total_tokens = 0.0, 0
-        for batch in loader:
-            input_ids = batch["input_ids"].to(device)
-            attention_mask = batch["attention_mask"].to(device)
-            labels = batch["labels"].to(device)
-            out = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-            n_tokens = (labels != -100).sum().item()
-            total_loss += out.loss.item() * n_tokens
-            total_tokens += n_tokens
-        losses[name] = total_loss / max(total_tokens, 1)
-    model.train()
-    return losses["math"], losses["code"]
+    dummy_train, _, _ = build_mixed_dataset(
+        math_train, math_train, 0.5, min(10, cfg.total_train_size),
+    )
+    ckpt_dir = os.path.join(cfg.output_dir, "_eval_tmp")
+    eval_trainer = SFTTrainer(
+        model=model,
+        processing_class=tokenizer,
+        train_dataset=dummy_train,
+        eval_dataset={"math": math_test, "code": code_test},
+        args=SFTConfig(
+            do_eval=True,
+            eval_strategy="no",
+            max_length=cfg.max_seq_length,
+            per_device_train_batch_size=cfg.per_device_train_batch_size,
+            num_train_epochs=1,
+            output_dir=ckpt_dir,
+            remove_unused_columns=False,
+            seed=cfg.seed,
+            report_to="none",
+            dataset_kwargs={"skip_prepare_dataset": True},
+        ),
+    )
+    metrics = eval_trainer.evaluate()
+    del eval_trainer
+    torch.cuda.empty_cache()
+    return metrics["eval_math_loss"], metrics["eval_code_loss"]
 
 
 # =========================================================
@@ -266,8 +251,8 @@ def compute_metric_and_ratio(v1, v2, target_domain, target_value, nx, ny, eps):
 # 5. 有限差分：tentative SFTTrainer N步 → re-eval → restore
 # =========================================================
 def finite_diff_direction(model, tokenizer, domain_train_dataset,
-                          math_eval_loader, code_eval_loader,
-                          device, norm_params, nx_before, ny_before,
+                          math_train, math_test, code_test,
+                          norm_params, nx_before, ny_before,
                           cfg):
     """用纯 domain 数据跑 rebalance_steps 步 tentative 训练，测量归一化 loss 空间位移。"""
     from trl import SFTTrainer, SFTConfig
@@ -298,15 +283,15 @@ def finite_diff_direction(model, tokenizer, domain_train_dataset,
         ),
     )
     trainer.train()
+    del trainer
+    torch.cuda.empty_cache()
 
     # re-eval after tentative training
-    raw_math, raw_code = evaluate_losses(model, math_eval_loader, code_eval_loader, device)
+    raw_math, raw_code = evaluate_losses(model, tokenizer, math_train, math_test, code_test, cfg)
     nx_after, ny_after = normalize_losses(raw_math, raw_code, norm_params)
 
     # restore model
     model.load_state_dict(model_state)
-    del trainer
-    torch.cuda.empty_cache()
 
     return np.array([nx_after - nx_before, ny_after - ny_before])
 
@@ -372,7 +357,6 @@ def main(cfg: GeoGradConfig | None = None):
 
 
 def _run(cfg: GeoGradConfig):
-    from functools import partial
     from transformers import AutoModelForCausalLM, AutoTokenizer
     from trl import SFTTrainer, SFTConfig
 
@@ -397,7 +381,6 @@ def _run(cfg: GeoGradConfig):
     tokenizer = AutoTokenizer.from_pretrained(cfg.base_model_path)
     model.to(device)
     model.train()
-    pad_token_id = tokenizer.pad_token_id or tokenizer.eos_token_id
 
     # --- 加载数据集 ---
     print("Loading datasets ...")
@@ -411,15 +394,6 @@ def _run(cfg: GeoGradConfig):
     math_test = pre_tokenize_pool(math_test, tokenizer, cfg.max_seq_length)
     code_test = pre_tokenize_pool(code_test, tokenizer, cfg.max_seq_length)
     print("  Pre-tokenization done.")
-
-    # eval DataLoader（finite-diff 前后对比用）
-    collate = partial(_eval_collate_fn, pad_token_id=pad_token_id)
-    math_eval_loader = torch.utils.data.DataLoader(
-        math_test, batch_size=cfg.per_device_train_batch_size,
-        shuffle=False, collate_fn=collate)
-    code_eval_loader = torch.utils.data.DataLoader(
-        code_test, batch_size=cfg.per_device_train_batch_size,
-        shuffle=False, collate_fn=collate)
 
     # --- 主循环 ---
     epoch_logs = []
@@ -443,7 +417,7 @@ def _run(cfg: GeoGradConfig):
 
         # 1. Evaluate
         print("  Evaluating ...")
-        raw_math, raw_code = evaluate_losses(model, math_eval_loader, code_eval_loader, device)
+        raw_math, raw_code = evaluate_losses(model, tokenizer, math_train, math_test, code_test, cfg)
         nx, ny = normalize_losses(raw_math, raw_code, norm_params)
         print(f"  raw: math={raw_math:.6f}, code={raw_code:.6f}")
         print(f"  normalized: ({nx:.6f}, {ny:.6f})")
@@ -456,15 +430,15 @@ def _run(cfg: GeoGradConfig):
         # 2. Tentative: 纯 math → v1
         print("  Computing v1 (math tentative) ...")
         v1 = finite_diff_direction(model, tokenizer, math_train,
-                                   math_eval_loader, code_eval_loader,
-                                   device, norm_params, nx, ny, cfg)
+                                   math_train, math_test, code_test,
+                                   norm_params, nx, ny, cfg)
         print(f"  v1 = ({v1[0]:.8f}, {v1[1]:.8f})")
 
         # 3. Tentative: 纯 code → v2
         print("  Computing v2 (code tentative) ...")
         v2 = finite_diff_direction(model, tokenizer, code_train,
-                                   math_eval_loader, code_eval_loader,
-                                   device, norm_params, nx, ny, cfg)
+                                   math_train, math_test, code_test,
+                                   norm_params, nx, ny, cfg)
         print(f"  v2 = ({v2[0]:.8f}, {v2[1]:.8f})")
 
         # 4. 度规 → ratio
