@@ -347,12 +347,13 @@ def _run(cfg: GeoGuideConfig):
     # --- 限制 Trainer 只用训练卡 ---
     # geo_common 已在 geo_device 上初始化完毕，CUDA context 已建立。
     # 缩减 CUDA_VISIBLE_DEVICES 在 runtime 初始化后不影响 device_count()，
-    # 所以额外设置 WORLD_SIZE=1 阻止 Trainer 做 DataParallel。
+    # 所以额外设置 WORLD_SIZE=1 并 patch device_count 阻止 Trainer 做 DataParallel。
     if cfg.train_device != cfg.geo_device:
         vis = os.environ.get("CUDA_VISIBLE_DEVICES", "")
         train_vis_idx = cfg.train_device.replace("cuda:", "")  # "0"
         os.environ["CUDA_VISIBLE_DEVICES"] = vis.split(",")[int(train_vis_idx)]
         os.environ["WORLD_SIZE"] = "1"
+        torch.cuda.device_count = lambda: 1
         print(f"  Shrunk CUDA_VISIBLE_DEVICES to {os.environ['CUDA_VISIBLE_DEVICES']} "
               f"(Trainer single-GPU, geo_common stays on {cfg.geo_device})")
 
