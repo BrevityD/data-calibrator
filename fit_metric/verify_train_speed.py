@@ -1,9 +1,9 @@
 """
-验证 trainer.train() 速度差异：
-  A) train_with_geo 风格 — 无 eval 配置
-  B) sft_via_geoguide 风格 — do_eval=True, eval_strategy="steps", eval_steps=999
+验证 token 数量对 trainer.train() 速度的影响。
 
-用完全相同的数据集和模型，排除数据差异。
+用两种 ratio 构建数据集，对比每步 token 数和训练耗时：
+  A) ratio=0.7676 (train_with_geo epoch 0)
+  B) ratio=0.6731 (sft_via_geoguide segment 0)
 """
 
 import os
@@ -55,50 +55,13 @@ def build_mixed_dataset(math_train, code_train, math_ratio, total_size):
     return mixed, n_math, n_code
 
 
-def run_train_A(model, tokenizer, mixed_train, steps, tag):
-    """train_with_geo 风格: 无 eval"""
+def run_train(model, tokenizer, mixed_train, steps, tag):
     out_dir = f"/tmp/verify_speed_{tag}"
     trainer = SFTTrainer(
         model=model,
         processing_class=tokenizer,
         train_dataset=mixed_train,
         args=SFTConfig(
-            max_steps=steps,
-            per_device_train_batch_size=4,
-            gradient_accumulation_steps=4,
-            learning_rate=2e-7,
-            max_length=16384,
-            num_train_epochs=9999,
-            logging_steps=1,
-            output_dir=out_dir,
-            remove_unused_columns=False,
-            seed=SEED,
-            save_strategy="no",
-            report_to="none",
-            dataset_kwargs={"skip_prepare_dataset": True},
-        ),
-    )
-    t0 = time.time()
-    trainer.train()
-    elapsed = time.time() - t0
-    del trainer
-    torch.cuda.empty_cache()
-    return elapsed
-
-
-def run_train_B(model, tokenizer, mixed_train, eval_dataset, steps, tag):
-    """sft_via_geoguide 风格: do_eval=True, eval_strategy=steps, eval_steps=999"""
-    out_dir = f"/tmp/verify_speed_{tag}"
-    trainer = SFTTrainer(
-        model=model,
-        processing_class=tokenizer,
-        train_dataset=mixed_train,
-        eval_dataset=eval_dataset,
-        args=SFTConfig(
-            do_eval=True,
-            eval_strategy="steps",
-            eval_steps=999,
-            eval_on_start=False,
             max_steps=steps,
             per_device_train_batch_size=4,
             gradient_accumulation_steps=4,
@@ -124,7 +87,6 @@ def run_train_B(model, tokenizer, mixed_train, eval_dataset, steps, tag):
 
 def main():
     set_seed(SEED)
-    RATIO = 0.6731  # sft_via_geoguide segment 0 的 ratio
     STEPS = 19
 
     model_path = "/public/home/jza/share_model/Qwen/Qwen3-1.7B"
@@ -139,42 +101,44 @@ def main():
     print("Pre-tokenizing ...")
     math_train = pre_tokenize_pool(math_train, tokenizer, 16384)
     code_train = pre_tokenize_pool(code_train, tokenizer, 16384)
-    math_test = pre_tokenize_pool(math_test, tokenizer, 16384)
-    code_test = pre_tokenize_pool(code_test, tokenizer, 16384)
 
-    mixed_train, n_math, n_code = build_mixed_dataset(
-        math_train, code_train, RATIO, 1000,
-    )
-    print(f"Mixed dataset: {n_math} math + {n_code} code = {len(mixed_train)}")
-
-    eval_dataset = {"math": math_test, "code": code_test}
-
-    # 保存初始权重
     init_state = deepcopy(model.state_dict())
 
-    # --- A: train_with_geo 风格 ---
-    print("\n" + "=" * 60)
-    print("A) train_with_geo style (no eval config)")
-    print("=" * 60)
-    model.load_state_dict(init_state)
-    elapsed_A = run_train_A(model, tokenizer, mixed_train, STEPS, "A")
-    print(f"  elapsed: {elapsed_A:.2f}s  ({elapsed_A/STEPS:.2f}s/step)")
+    ratios = {
+        "A (train_with_geo epoch0)": 0.7676,
+        "B (sft_via_geoguide seg0)": 0.6731,
+    }
 
-    # --- B: sft_via_geoguide 风格 ---
-    print("\n" + "=" * 60)
-    print("B) sft_via_geoguide style (do_eval=True, eval_steps=999)")
-    print("=" * 60)
-    model.load_state_dict(init_state)
-    elapsed_B = run_train_B(model, tokenizer, mixed_train, eval_dataset, STEPS, "B")
-    print(f"  elapsed: {elapsed_B:.2f}s  ({elapsed_B/STEPS:.2f}s/step)")
+    results = {}
+    for label, ratio in ratios.items():
+        mixed, n_math, n_code = build_mixed_dataset(
+            math_train, code_train, ratio, 1000,
+        )
+        total_tokens = sum(len(x) for x in mixed["input_ids"])
+        avg_tokens = total_tokens / len(mixed)
+        print(f"\n{'=' * 60}")
+        print(f"{label}: ratio={ratio}")
+        print(f"  {n_math} math + {n_code} code = {len(mixed)}")
+        print(f"  total_tokens={total_tokens}, avg={avg_tokens:.1f} tokens/sample")
+        print(f"{'=' * 60}")
 
-    # --- 对比 ---
-    print("\n" + "=" * 60)
+        model.load_state_dict(init_state)
+        elapsed = run_train(model, tokenizer, mixed, STEPS, label[:1])
+        print(f"  elapsed: {elapsed:.2f}s  ({elapsed/STEPS:.2f}s/step)")
+        results[label] = {
+            "ratio": ratio, "n_math": n_math, "n_code": n_code,
+            "total_tokens": total_tokens, "avg_tokens": avg_tokens,
+            "elapsed": elapsed, "per_step": elapsed / STEPS,
+        }
+
+    print(f"\n{'=' * 60}")
     print("COMPARISON")
-    print("=" * 60)
-    print(f"  A (no eval):   {elapsed_A:.2f}s  ({elapsed_A/STEPS:.2f}s/step)")
-    print(f"  B (with eval):  {elapsed_B:.2f}s  ({elapsed_B/STEPS:.2f}s/step)")
-    print(f"  ratio B/A:      {elapsed_B/elapsed_A:.2f}x")
+    print(f"{'=' * 60}")
+    for label, r in results.items():
+        print(f"  {label}:")
+        print(f"    {r['n_math']}m+{r['n_code']}c  "
+              f"avg={r['avg_tokens']:.0f}tok/sample  "
+              f"{r['elapsed']:.2f}s  ({r['per_step']:.2f}s/step)")
 
 
 if __name__ == "__main__":
