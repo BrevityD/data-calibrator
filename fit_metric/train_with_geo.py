@@ -119,7 +119,7 @@ def normalize_losses(math_loss: float, code_loss: float, norm_params: dict):
     code_range = norm_params["code_max"] - norm_params["code_min"]
     x = (math_loss - norm_params["math_min"]) / math_range if math_range > 0 else 0.0
     y = (code_loss - norm_params["code_min"]) / code_range if code_range > 0 else 0.0
-    return float(np.clip(x, 0.0, 1.0)), float(np.clip(y, 0.0, 1.0))
+    return float(x), float(y)
 
 
 # =========================================================
