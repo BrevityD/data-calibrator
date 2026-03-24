@@ -357,6 +357,9 @@ def _run(cfg: GeoGuideConfig):
               f"(Trainer single-GPU, geo_common stays on {cfg.geo_device})")
 
     # --- 加载数据集 ---
+    # 重置 seed，确保数据采样与 train_with_geo.py 一致
+    # （geo_common.init 中 VectorField() 初始化会消耗随机状态）
+    set_seed(cfg.seed)
     print("Loading datasets ...")
     math_train, math_test = get_math_dataset(size=cfg.dataset_pool_size)
     code_train, code_test = get_code_dataset(size=cfg.dataset_pool_size)

@@ -384,6 +384,9 @@ def _run(cfg: GeoGradConfig):
     model.train()
 
     # --- 加载数据集 ---
+    # 重置 seed，确保数据采样与 sft_via_geoguide.py 一致
+    # （前面的模型加载可能消耗随机状态）
+    set_seed(cfg.seed)
     print("Loading datasets ...")
     math_train, math_test = get_math_dataset(size=cfg.dataset_pool_size)
     code_train, code_test = get_code_dataset(size=cfg.dataset_pool_size)
