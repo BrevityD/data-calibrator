@@ -1,14 +1,15 @@
 """
-验证 token 数量对 trainer.train() 速度的影响。
+验证 geo_common 初始化 + CUDA_VISIBLE_DEVICES 缩减对 trainer.train() 速度的影响。
 
-用两种 ratio 构建数据集，对比每步 token 数和训练耗时：
-  A) ratio=0.7676 (train_with_geo epoch 0)
-  B) ratio=0.6731 (sft_via_geoguide segment 0)
+对比：
+  A) 干净环境 (单卡, CUDA_VISIBLE_DEVICES=3)
+  B) 模拟 sft_via_geoguide 环境:
+     先在两张卡上初始化 geo_common，再缩减 CUDA_VISIBLE_DEVICES
 """
 
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "3"
-os.environ["WORLD_SIZE"] = "1"
+# 先设两张卡，模拟 sft_via_geoguide 的初始状态
+os.environ["CUDA_VISIBLE_DEVICES"] = "3,4"
 
 import sys
 import time
@@ -27,6 +28,7 @@ from copy import deepcopy
 from datacalibrator.datasets.math_adaptor import get_math_dataset
 from datacalibrator.datasets.code_adaptor import get_code_dataset
 from datacalibrator.seed import SEED, set_seed
+import geo_common
 
 
 def pre_tokenize_pool(dataset, tokenizer, max_length: int):
@@ -88,57 +90,55 @@ def run_train(model, tokenizer, mixed_train, steps, tag):
 def main():
     set_seed(SEED)
     STEPS = 19
+    RATIO = 0.6731
 
     model_path = "/public/home/jza/share_model/Qwen/Qwen3-1.7B"
-    print(f"Loading model from {model_path} ...")
+
+    # ---- Phase 1: 初始化 geo_common (在 cuda:1 即物理卡4) ----
+    print("Initializing geo_common on cuda:1 ...")
+    geo_common.init(device_str="cuda:1", seed=SEED)
+    print(f"  torch.cuda.device_count() = {torch.cuda.device_count()}")
+
+    # ---- Phase 2: 缩减 CUDA_VISIBLE_DEVICES (模拟 sft_via_geoguide) ----
+    os.environ["CUDA_VISIBLE_DEVICES"] = "3"
+    os.environ["WORLD_SIZE"] = "1"
+    print(f"  Shrunk CUDA_VISIBLE_DEVICES to 3")
+    print(f"  torch.cuda.device_count() = {torch.cuda.device_count()}")
+
+    # ---- 加载模型和数据 ----
+    print(f"\nLoading model from {model_path} ...")
     model = AutoModelForCausalLM.from_pretrained(model_path)
     tokenizer = AutoTokenizer.from_pretrained(model_path)
 
     print("Loading datasets ...")
-    math_train, math_test = get_math_dataset(size=1000)
-    code_train, code_test = get_code_dataset(size=1000)
+    math_train, _ = get_math_dataset(size=1000)
+    code_train, _ = get_code_dataset(size=1000)
 
     print("Pre-tokenizing ...")
     math_train = pre_tokenize_pool(math_train, tokenizer, 16384)
     code_train = pre_tokenize_pool(code_train, tokenizer, 16384)
 
+    mixed, n_math, n_code = build_mixed_dataset(
+        math_train, code_train, RATIO, 1000,
+    )
+    print(f"Mixed: {n_math} math + {n_code} code")
+
     init_state = deepcopy(model.state_dict())
 
-    ratios = {
-        "A (train_with_geo epoch0)": 0.7676,
-        "B (sft_via_geoguide seg0)": 0.6731,
-    }
-
-    results = {}
-    for label, ratio in ratios.items():
-        mixed, n_math, n_code = build_mixed_dataset(
-            math_train, code_train, ratio, 1000,
-        )
-        total_tokens = sum(len(x) for x in mixed["input_ids"])
-        avg_tokens = total_tokens / len(mixed)
-        print(f"\n{'=' * 60}")
-        print(f"{label}: ratio={ratio}")
-        print(f"  {n_math} math + {n_code} code = {len(mixed)}")
-        print(f"  total_tokens={total_tokens}, avg={avg_tokens:.1f} tokens/sample")
-        print(f"{'=' * 60}")
-
-        model.load_state_dict(init_state)
-        elapsed = run_train(model, tokenizer, mixed, STEPS, label[:1])
-        print(f"  elapsed: {elapsed:.2f}s  ({elapsed/STEPS:.2f}s/step)")
-        results[label] = {
-            "ratio": ratio, "n_math": n_math, "n_code": n_code,
-            "total_tokens": total_tokens, "avg_tokens": avg_tokens,
-            "elapsed": elapsed, "per_step": elapsed / STEPS,
-        }
+    # ---- B: 带 geo_common 环境训练 ----
+    print(f"\n{'=' * 60}")
+    print("B) With geo_common initialized (simulating sft_via_geoguide)")
+    print(f"{'=' * 60}")
+    model.load_state_dict(init_state)
+    elapsed_B = run_train(model, tokenizer, mixed, STEPS, "B")
+    print(f"  elapsed: {elapsed_B:.2f}s  ({elapsed_B/STEPS:.2f}s/step)")
 
     print(f"\n{'=' * 60}")
-    print("COMPARISON")
+    print("RESULT")
     print(f"{'=' * 60}")
-    for label, r in results.items():
-        print(f"  {label}:")
-        print(f"    {r['n_math']}m+{r['n_code']}c  "
-              f"avg={r['avg_tokens']:.0f}tok/sample  "
-              f"{r['elapsed']:.2f}s  ({r['per_step']:.2f}s/step)")
+    print(f"  With geo_common: {elapsed_B:.2f}s  ({elapsed_B/STEPS:.2f}s/step)")
+    print(f"  Previous clean run was ~20s (~1.05s/step)")
+    print(f"  If this is >>20s, geo_common env is the cause.")
 
 
 if __name__ == "__main__":
