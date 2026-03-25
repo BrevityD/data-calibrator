@@ -51,7 +51,12 @@ Requirements:
 - Scripts should create the output directory automatically if it does not exist
 - Result directories must be ignored by Git and must not be committed
 
+### Scripts
 
+- All runnable scripts should be placed under `fit_metric/scripts/`.
+- When adding a new script, create the corresponding file under `fit_metric/scripts/` automatically.
+- Script names should be clear, descriptive, and consistent with existing naming conventions.
+- Each script should be designed so that its outputs can be stored in a dedicated result directory based on the script name.
 
 ## Project Management with `git`
 
