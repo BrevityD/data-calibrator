@@ -44,7 +44,7 @@ Examples:
 - `fit_metric/draw_geo_orthogonal.py` → `fit_metric/result/draw_geo_orthogonal/<timestamp>/`
 - `fit_metric/variational_geodesic.py` → `fit_metric/result/variational_geodesic/<timestamp>/`
 - `fit_metric/train_with_geo.py` → `fit_metric/result/train_with_geo/<timestamp>/`
-- `fit_metric/scripts/sft_mix_ablation.py` → `fit_metric/result/sft_mix_ablation/<timestamp>/`
+- `fit_metric/sft_mix_ablation.py` → `fit_metric/result/sft_mix_ablation/<timestamp>/`
 
 Requirements:
 - Each execution should create a new timestamped directory
@@ -54,10 +54,11 @@ Requirements:
 
 ### Scripts
 
-- All runnable scripts should be placed under `fit_metric/scripts/`.
-- When adding a new script, create the corresponding file under `fit_metric/scripts/` automatically.
-- Script names should be clear, descriptive, and consistent with existing naming conventions.
-- Each script should be designed so that its outputs can be stored in a dedicated result directory based on the script name.
+- All runnable bash scripts should be placed under `fit_metric/script/`.
+- When adding a new runnable Python script, also create a corresponding bash script under `fit_metric/script/`.
+- The bash script should correspond clearly to its target Python script.
+- Bash script names should be clear, descriptive, and consistent with existing naming conventions.
+- Each bash script should serve as the standard entry point for running its corresponding experiment or task.
 
 
 ## Project Management with `git`
