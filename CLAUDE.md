@@ -44,6 +44,7 @@ Examples:
 - `fit_metric/draw_geo_orthogonal.py` → `fit_metric/result/draw_geo_orthogonal/<timestamp>/`
 - `fit_metric/variational_geodesic.py` → `fit_metric/result/variational_geodesic/<timestamp>/`
 - `fit_metric/train_with_geo.py` → `fit_metric/result/train_with_geo/<timestamp>/`
+- `fit_metric/scripts/sft_mix_ablation.py` → `fit_metric/result/sft_mix_ablation/<timestamp>/`
 
 Requirements:
 - Each execution should create a new timestamped directory

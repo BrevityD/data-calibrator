@@ -20,7 +20,8 @@ import matplotlib.pyplot as plt
 from datasets import concatenate_datasets
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
-_PROJECT_ROOT = _SCRIPT_DIR.parent
+_FIT_METRIC_DIR = _SCRIPT_DIR.parent
+_PROJECT_ROOT = _FIT_METRIC_DIR.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
 
 from datacalibrator.datasets.math_adaptor import get_math_dataset
@@ -165,7 +166,7 @@ def main(cfg: AblationConfig):
     os.environ["WANDB_PROJECT"] = cfg.wandb_project
 
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    output_dir = str(_SCRIPT_DIR / "result" / "sft_mix_ablation" / timestamp)
+    output_dir = str(_FIT_METRIC_DIR / "result" / "sft_mix_ablation" / timestamp)
     os.makedirs(output_dir, exist_ok=True)
 
     set_seed(cfg.seed)
