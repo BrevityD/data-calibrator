@@ -1,0 +1,3 @@
+[submodule "samples/experiment-reprod-damo/DaMo"]
+	path = samples/experiment-reprod-damo/DaMo
+	url = git@github.com:BrevityD/DaMo.git
