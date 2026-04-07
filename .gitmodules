@@ -1,3 +1,6 @@
 [submodule "samples/experiment-reprod-damo/DaMo"]
 	path = samples/experiment-reprod-damo/DaMo
 	url = git@github.com:BrevityD/DaMo.git
+[submodule "samples/experiment-reprod-DMO/Data-Mixing-Optimization"]
+	path = samples/experiment-reprod-DMO/Data-Mixing-Optimization
+	url = git@github.com:BrevityD/Data-Mixing-Optimization.git
