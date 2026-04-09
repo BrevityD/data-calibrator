@@ -1,0 +1,35 @@
+[project]
+name = "experiment-reprod-dmo"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "accelerate>=0.34.0,<=1.11.0",
+    "av>=17.0.0",
+    "datasets>=2.16.0,<=3.0.2",
+    "einops>=0.8.2",
+    "fastapi>=0.135.3",
+    "fire>=0.7.1",
+    "gradio>=4.0.0,<5.0.0",
+    "langdetect>=1.0.9",
+    "loguru>=0.7.3",
+    "matplotlib>=3.7.0",
+    "numpy<2.0.0",
+    "packaging>=26.0",
+    "pandas>=2.0.0",
+    "peft==0.18.1",
+    "protobuf>=7.34.1",
+    "pydantic>=2.12.5",
+    "pyyaml>=6.0.3",
+    "scipy>=1.15.3",
+    "sentencepiece>=0.2.1",
+    "sse-starlette>=3.3.4",
+    "tiktoken>=0.12.0",
+    "transformers>=4.41.2,<=4.57.1",
+    "trl>=0.8.6,<=0.24.0",
+    "torch<=2.8.0",
+    "uvicorn>=0.44.0",
+    "deepspeed>=0.18.9",
+    "torchaudio==2.8.0",
+]
